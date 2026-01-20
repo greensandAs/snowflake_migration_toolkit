@@ -11,7 +11,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  # JOB 1: LINTING (Optional - will skip if config missing)
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -24,10 +23,8 @@ jobs:
       - name: Install SQLFluff
         run: pip install sqlfluff
       - name: Run Linter
-        # Using default dialect to avoid config error
         run: sqlfluff lint scripts --dialect snowflake
 
-  # JOB 2: DEPLOYMENT
   deploy:
     needs: lint
     runs-on: ubuntu-latest
@@ -46,12 +43,11 @@ jobs:
 
       - name: Run Schemachange
         env:
-          # These must match the names in your Screenshot EXACTLY
           SF_ACCOUNT: ${{ secrets.SF_ACCOUNT }}
           SF_USERNAME: ${{ secrets.SF_USERNAME }}
-          SF_PASSWORD: ${{ secrets.SF_PASSWORD }}
+          # FIX 1: Map the secret to the specific variable name Schemachange expects
+          SNOWFLAKE_PASSWORD: ${{ secrets.SF_PASSWORD }}
         run: |
-          # Extract variables
           DB_NAME=$(jq -r '.sf_database' config.json)
           WH_NAME=$(jq -r '.sf_warehouse' config.json)
           ROLE_NAME=$(jq -r '.sf_role' config.json)
@@ -59,12 +55,11 @@ jobs:
 
           echo "Deploying to Database: $DB_NAME"
 
-          # Execute Deployment
-          
-          schemachange -f ./scripts \
+          # FIX 2: Added "deploy" subcommand and removed "-p" flag
+          schemachange deploy \
+            -f ./scripts \
             -a $SF_ACCOUNT \
             -u $SF_USERNAME \
-            -p $SF_PASSWORD \
             -r $ROLE_NAME \
             -w $WH_NAME \
             -d $DB_NAME \
