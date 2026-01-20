@@ -1,6 +1,5 @@
 name: Deploy to Snowflake
 
-# Trigger the workflow when code is pushed to the main branch
 on:
   push:
     branches:
@@ -11,46 +10,60 @@ on:
       - '.github/workflows/**'
 
 jobs:
-  deploy:
+  # JOB 1: LINTING (Quality Check)
+  lint:
     runs-on: ubuntu-latest
-
     steps:
-      # Step 1: Check out the code from the repo
       - name: Checkout Code
         uses: actions/checkout@v3
 
-      # Step 2: Set up Python
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      # Step 3: Install the deployment tool
+      - name: Install SQLFluff
+        run: pip install sqlfluff
+
+      - name: Run Linter
+        # This checks all SQL files in the scripts folder
+        # If any file violates the rules, this step fails and stops the pipeline
+        run: |
+          echo "Linting SQL files..."
+          sqlfluff lint scripts --config .sqlfluff
+
+  # JOB 2: DEPLOYMENT (Only runs if Lint succeeds)
+  deploy:
+    needs: lint  # <--- This is the dependency!
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
       - name: Install Schemachange
         run: pip install schemachange
 
-      # Step 4: Run the deployment
       - name: Run Schemachange
         env:
-          # Load secrets from GitHub Settings
           SF_ACCOUNT: ${{ secrets.SF_ACCOUNT }}
           SF_USERNAME: ${{ secrets.SF_USERNAME }}
           SF_PASSWORD: ${{ secrets.SF_PASSWORD }}
         run: |
-          echo "Reading configuration..."
-          
-          # Extract variables from config.json using jq
+          # Extract variables
           DB_NAME=$(jq -r '.sf_database' config.json)
           WH_NAME=$(jq -r '.sf_warehouse' config.json)
           ROLE_NAME=$(jq -r '.sf_role' config.json)
-          
-          # Read the entire config file into a variable for Jinja templates
           VARS_JSON=$(cat config.json)
 
-          echo "Deploying to Database: $DB_NAME using Warehouse: $WH_NAME"
-          echo "History Table will be stored at: $DB_NAME.SCHEMACHANGE.CHANGE_HISTORY"
+          echo "Deploying to Database: $DB_NAME"
 
-          # Execute the deployment
+          # Execute Deployment
           schemachange -f ./scripts \
             -a $SF_ACCOUNT \
             -u $SF_USERNAME \
