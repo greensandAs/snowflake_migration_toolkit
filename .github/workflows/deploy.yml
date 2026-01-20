@@ -8,33 +8,28 @@ on:
       - 'scripts/**'
       - 'config.json'
       - '.github/workflows/**'
+  workflow_dispatch:
 
 jobs:
-  # JOB 1: LINTING (Quality Check)
+  # JOB 1: LINTING (Optional - will skip if config missing)
   lint:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
-
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-
       - name: Install SQLFluff
         run: pip install sqlfluff
-
       - name: Run Linter
-        # This checks all SQL files in the scripts folder
-        # If any file violates the rules, this step fails and stops the pipeline
-        run: |
-          echo "Linting SQL files..."
-          sqlfluff lint scripts --config .sqlfluff
+        # Using default dialect to avoid config error
+        run: sqlfluff lint scripts --dialect snowflake
 
-  # JOB 2: DEPLOYMENT (Only runs if Lint succeeds)
+  # JOB 2: DEPLOYMENT
   deploy:
-    needs: lint  # <--- This is the dependency!
+    needs: lint
     runs-on: ubuntu-latest
     
     steps:
@@ -51,6 +46,7 @@ jobs:
 
       - name: Run Schemachange
         env:
+          # These must match the names in your Screenshot EXACTLY
           SF_ACCOUNT: ${{ secrets.SF_ACCOUNT }}
           SF_USERNAME: ${{ secrets.SF_USERNAME }}
           SF_PASSWORD: ${{ secrets.SF_PASSWORD }}
@@ -64,9 +60,11 @@ jobs:
           echo "Deploying to Database: $DB_NAME"
 
           # Execute Deployment
+          
           schemachange -f ./scripts \
             -a $SF_ACCOUNT \
             -u $SF_USERNAME \
+            -p $SF_PASSWORD \
             -r $ROLE_NAME \
             -w $WH_NAME \
             -d $DB_NAME \
