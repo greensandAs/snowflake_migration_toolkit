@@ -39,6 +39,6 @@ jobs:
             -r $SNOWFLAKE_ROLE \
             -w $SNOWFLAKE_WAREHOUSE \
             -d $SNOWFLAKE_DATABASE \
-            -c $SNOWFLAKE_DATABASE.$SNOWFLAKE_SCHEMA.CHANGE_HISTORY \
+            -c $SNOWFLAKE_DATABASE.SCHEMACHANGE.CHANGE_HISTORY_TEST \
             --create-change-history-table \
             --vars "{\"snowflake_database\": \"$SNOWFLAKE_DATABASE\", \"snowflake_schema\": \"$SNOWFLAKE_SCHEMA\"}"
