@@ -83,7 +83,7 @@ def main():
         cur.execute(f"USE SCHEMA {SOURCE_CONFIG['database']}.{SOURCE_CONFIG['schema']}")
         
         # Buffer for Version 1.0.0 file
-        v1_content = "USE DATABASE {{ snowflake_database }};\n\n CREATE SCHEMA IF NOT EXISTS {{ snowflake_schema }};\n\n USE SCHEMA {{ snowflake_schema }};\n\n"
+        v1_content = "USE DATABASE {{ snowflake_database }};\n\nCREATE SCHEMA IF NOT EXISTS {{ snowflake_schema }};\n\nUSE SCHEMA {{ snowflake_schema }};\n\n"
         
         # 1. SEQUENCES
         print("\n🔢 Extracting Sequences...")
@@ -121,7 +121,7 @@ def main():
             for v in views:
                 cur.execute(f"SELECT GET_DDL('VIEW', '\"{v}\"')")
                 ddl = clean_ddl(cur.fetchone()[0])
-                content = "USE DATABASE {{ snowflake_database }};\n\n USE SCHEMA {{ snowflake_schema }};\n\n" + ddl + ";"
+                content = "USE DATABASE {{ snowflake_database }};\n\nUSE SCHEMA {{ snowflake_schema }};\n\n" + ddl + ";"
                 save_file(FOLDERS["VIEW"], f"R__{v}.sql", content)
         except Exception as e:
              print(f"   ⚠️ Error extracting views: {e}")
@@ -144,7 +144,7 @@ def main():
                     try:
                         cur.execute(f"SELECT GET_DDL('PROCEDURE', '{sig}')")
                         ddl = clean_ddl(cur.fetchone()[0])
-                        content = "USE SCHEMA {{ snowflake_schema }};\n\n" + ddl + ";"
+                        content = "USE DATABASE {{ snowflake_database }};\n\nUSE SCHEMA {{ snowflake_schema }};\n\n" + ddl + ";"
                         save_file(FOLDERS["PROC"], f"R__{clean_name}.sql", content)
                     except Exception as e:
                         print(f"   ⚠️ Failed to get DDL for Proc {name}: {e}")
@@ -169,7 +169,7 @@ def main():
                     try:
                         cur.execute(f"SELECT GET_DDL('FUNCTION', '{sig}')")
                         ddl = clean_ddl(cur.fetchone()[0])
-                        content = "USE DATABASE {{ snowflake_database }};\n\n USE SCHEMA {{ snowflake_schema }};\n\n" + ddl + ";"
+                        content = "USE DATABASE {{ snowflake_database }};\n\nUSE SCHEMA {{ snowflake_schema }};\n\n" + ddl + ";"
                         save_file(FOLDERS["FUNC"], f"R__{clean_name}.sql", content)
                     except Exception as e:
                         print(f"   ⚠️ Failed to get DDL for Func {name}: {e}")
