@@ -1,0 +1,34 @@
+name: 4. Load Data
+
+on: 
+  workflow_dispatch:
+
+jobs:
+  load-data:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install Dependencies
+        run: pip install snowflake-connector-python pandas
+
+      - name: Run Data Load Script
+        env:
+          # --- Secrets ---
+          TARGET_PASSWORD: ${{ secrets.TARGET_PASSWORD }}
+          
+          # --- Variables ---
+          TARGET_ACCOUNT: ${{ vars.TARGET_ACCOUNT }}
+          TARGET_USER: ${{ vars.TARGET_USER }}
+          TARGET_ROLE: ${{ vars.TARGET_ROLE }}
+          TARGET_WAREHOUSE: ${{ vars.TARGET_WAREHOUSE }}
+          TARGET_DATABASE: ${{ vars.TARGET_DATABASE }}
+          TARGET_SCHEMA: ${{ vars.TARGET_SCHEMA }}
+        run: python scripts/python/mig_load_data.py
