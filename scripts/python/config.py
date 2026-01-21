@@ -35,7 +35,7 @@ TARGET_CONFIG = {
 # 3. GLOBAL SETTINGS
 # ==========================================
 # List of tables to export data from
-DATA_TABLES_TO_EXPORT = ['DQ_EXPECTATION_MASTER'] 
+DATA_TABLES_TO_EXPORT = ['DQ_EXPECTATION_MASTER','DQ_EXPECTATION_HANDLER_MAPPING','DQ_EXPECTATION_ARGUMENTS','DQ_JOB_EXEC_CONFIG'] 
 
 # Dynamic Paths: Calculates folders based on where this script is located
 # This ensures it works on both Windows (Local) and Linux (GitHub Actions)
