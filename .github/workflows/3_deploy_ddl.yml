@@ -34,7 +34,7 @@ jobs:
         run: |
 
           echo "Deploying to Database: $DB_NAME"
-          
+
           # The -f flag points to the folder containing your generated SQL files
           schemachange deploy \
             -f scripts/ddl \
@@ -43,6 +43,6 @@ jobs:
             -r $SNOWFLAKE_ROLE \
             -w $SNOWFLAKE_WAREHOUSE \
             -d $SNOWFLAKE_DATABASE \
-            -c $SNOWFLAKE_DATABASE.SCHEMACHANGE.CHANGE_HISTORY_TEST \
+            -c $SNOWFLAKE_DATABASE.SCHEMACHANGE.CHANGE_HISTORY \
             --create-change-history-table \
             --vars "{\"snowflake_database\": \"$SNOWFLAKE_DATABASE\", \"snowflake_schema\": \"$SNOWFLAKE_SCHEMA\"}"
