@@ -43,6 +43,15 @@ jobs:
           SOURCE_OWNER_ROLE: ${{ vars.SOURCE_OWNER_ROLE }}
         run: python scripts/python/mig_ddl.py
 
+      
+      - name: Auto-Format DDL with SQLFluff
+        run: |
+          echo "🧹 Running SQLFluff Fix..."
+          # --force: skips confirmation prompts
+          # --dialect snowflake: explicitly sets dialect
+          # scripts/ddl: targets your DDL folder recursively
+          sqlfluff fix scripts/ddl --dialect snowflake --force || echo "⚠️ Some files could not be fixed, proceeding anyway..."
+
       - name: Commit and Push DDL Changes
         run: |
           git config --global user.name 'GitHub Actions'
