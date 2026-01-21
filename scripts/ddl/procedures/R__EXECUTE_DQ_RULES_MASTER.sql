@@ -346,4 +346,4 @@ def main(session: snowpark.Session, P_DATASET_ID, P_PARALLEL_JOBS):
         return int(config["FAILED_CODE"])
     else: 
         return int(config["SUCCESS_CODE"])
-';;
+';
