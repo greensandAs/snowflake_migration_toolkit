@@ -93,7 +93,7 @@ def main():
             for seq in seqs:
                 cur.execute(f"SELECT GET_DDL('SEQUENCE', '\"{seq}\"')")
                 ddl = clean_ddl(cur.fetchone()[0])
-                v1_content += f"-- Sequence: {seq}\n{ddl};\n\n"
+                v1_content += f"-- Sequence: {seq}\n{ddl}\n\n"
         except Exception as e:
             print(f"   ⚠️ Error extracting sequences: {e}")
 
@@ -106,7 +106,7 @@ def main():
                 cur.execute(f"SELECT GET_DDL('TABLE', '\"{t}\"')")
                 ddl = clean_ddl(cur.fetchone()[0])
                 ddl = ddl.replace("CREATE OR REPLACE TABLE", "CREATE TABLE IF NOT EXISTS")
-                v1_content += f"{ddl};\n\n"
+                v1_content += f"{ddl}\n\n"
         except Exception as e:
             print(f"   ⚠️ Error extracting tables: {e}")
             
@@ -121,7 +121,7 @@ def main():
             for v in views:
                 cur.execute(f"SELECT GET_DDL('VIEW', '\"{v}\"')")
                 ddl = clean_ddl(cur.fetchone()[0])
-                content = "USE DATABASE {{ snowflake_database }};\n\nUSE SCHEMA {{ snowflake_schema }};\n\n" + ddl + ";"
+                content = "USE DATABASE {{ snowflake_database }};\n\nUSE SCHEMA {{ snowflake_schema }};\n\n" + ddl
                 save_file(FOLDERS["VIEW"], f"R__{v}.sql", content)
         except Exception as e:
              print(f"   ⚠️ Error extracting views: {e}")
@@ -144,7 +144,7 @@ def main():
                     try:
                         cur.execute(f"SELECT GET_DDL('PROCEDURE', '{sig}')")
                         ddl = clean_ddl(cur.fetchone()[0])
-                        content = "USE DATABASE {{ snowflake_database }};\n\nUSE SCHEMA {{ snowflake_schema }};\n\n" + ddl + ";"
+                        content = "USE DATABASE {{ snowflake_database }};\n\nUSE SCHEMA {{ snowflake_schema }};\n\n" + ddl
                         save_file(FOLDERS["PROC"], f"R__{clean_name}.sql", content)
                     except Exception as e:
                         print(f"   ⚠️ Failed to get DDL for Proc {name}: {e}")
@@ -169,7 +169,7 @@ def main():
                     try:
                         cur.execute(f"SELECT GET_DDL('FUNCTION', '{sig}')")
                         ddl = clean_ddl(cur.fetchone()[0])
-                        content = "USE DATABASE {{ snowflake_database }};\n\nUSE SCHEMA {{ snowflake_schema }};\n\n" + ddl + ";"
+                        content = "USE DATABASE {{ snowflake_database }};\n\nUSE SCHEMA {{ snowflake_schema }};\n\n" + ddl
                         save_file(FOLDERS["FUNC"], f"R__{clean_name}.sql", content)
                     except Exception as e:
                         print(f"   ⚠️ Failed to get DDL for Func {name}: {e}")
