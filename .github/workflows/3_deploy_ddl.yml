@@ -1,0 +1,44 @@
+name: 3. Deploy DDL
+
+on: 
+  workflow_dispatch:
+
+jobs:
+  deploy-ddl:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install Schemachange
+        run: pip install schemachange
+
+      - name: Deploy DDL to Target
+        env:
+          # --- Secrets ---
+          SNOWFLAKE_PASSWORD: ${{ secrets.TARGET_PASSWORD }}
+          
+          # --- Variables (Mapped to standard Schemachange Env Vars) ---
+          SNOWFLAKE_ACCOUNT: ${{ vars.TARGET_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ vars.TARGET_USER }}
+          SNOWFLAKE_ROLE: ${{ vars.TARGET_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ vars.TARGET_WAREHOUSE }}
+          SNOWFLAKE_DATABASE: ${{ vars.TARGET_DATABASE }}
+          SNOWFLAKE_SCHEMA: ${{ vars.TARGET_SCHEMA }}
+        run: |
+          # The -f flag points to the folder containing your generated SQL files
+          schemachange -f scripts/ddl \
+            -a $SNOWFLAKE_ACCOUNT \
+            -u $SNOWFLAKE_USER \
+            -r $SNOWFLAKE_ROLE \
+            -w $SNOWFLAKE_WAREHOUSE \
+            -d $SNOWFLAKE_DATABASE \
+            -c $SNOWFLAKE_DATABASE.$SNOWFLAKE_SCHEMA.CHANGE_HISTORY \
+            --create-change-history-table \
+            --vars "{\"snowflake_database\": \"$SNOWFLAKE_DATABASE\", \"snowflake_schema\": \"$SNOWFLAKE_SCHEMA\"}"

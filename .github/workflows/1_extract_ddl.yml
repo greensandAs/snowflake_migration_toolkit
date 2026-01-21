@@ -1,0 +1,53 @@
+name: 1. Extract DDL
+
+on: 
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: 'Python Version'
+        required: false
+        default: '3.10'
+
+jobs:
+  extract-ddl:
+    runs-on: ubuntu-latest
+    
+    # Permission to write to the repo is required for pushing changes
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ inputs.python_version }}
+          
+      - name: Install Dependencies
+        run: pip install snowflake-connector-python pandas
+
+      - name: Run DDL Extraction Script
+        env:
+          # --- Secrets (For Auth) ---
+          SOURCE_PASSWORD: ${{ secrets.SOURCE_PASSWORD }}
+          
+          # --- Variables (For Config) ---
+          SOURCE_ACCOUNT: ${{ vars.SOURCE_ACCOUNT }}
+          SOURCE_USER: ${{ vars.SOURCE_USER }}
+          SOURCE_ROLE: ${{ vars.SOURCE_ROLE }}
+          SOURCE_WAREHOUSE: ${{ vars.SOURCE_WAREHOUSE }}
+          SOURCE_DATABASE: ${{ vars.SOURCE_DATABASE }}
+          SOURCE_SCHEMA: ${{ vars.SOURCE_SCHEMA }}
+          SOURCE_OWNER_ROLE: ${{ vars.SOURCE_OWNER_ROLE }}
+        run: python scripts/python/mig_ddl.py
+
+      - name: Commit and Push DDL Changes
+        run: |
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'actions@github.com'
+          git add scripts/ddl/
+          # Commit only if there are changes
+          git commit -m "Auto-generated DDL extraction" || echo "No changes to commit"
+          git push

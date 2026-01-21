@@ -1,0 +1,46 @@
+name: 2. Extract Data
+
+on: 
+  workflow_dispatch:
+
+jobs:
+  extract-data:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install Dependencies
+        run: pip install snowflake-connector-python pandas
+
+      - name: Run Data Export Script
+        env:
+          # --- Secrets ---
+          SOURCE_PASSWORD: ${{ secrets.SOURCE_PASSWORD }}
+          
+          # --- Variables ---
+          SOURCE_ACCOUNT: ${{ vars.SOURCE_ACCOUNT }}
+          SOURCE_USER: ${{ vars.SOURCE_USER }}
+          SOURCE_ROLE: ${{ vars.SOURCE_ROLE }}
+          SOURCE_WAREHOUSE: ${{ vars.SOURCE_WAREHOUSE }}
+          SOURCE_DATABASE: ${{ vars.SOURCE_DATABASE }}
+          SOURCE_SCHEMA: ${{ vars.SOURCE_SCHEMA }}
+        run: python scripts/python/mig_dml_export.py
+
+      - name: Commit and Push Data Files
+        run: |
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'actions@github.com'
+          # Add the specific folder where CSVs are saved
+          git add data_exports/
+          git commit -m "Auto-generated Data extraction" || echo "No changes to commit"
+          git push
