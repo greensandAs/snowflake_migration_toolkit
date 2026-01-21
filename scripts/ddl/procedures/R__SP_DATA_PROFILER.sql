@@ -332,4 +332,4 @@ def run_profiler_sp(session, run_id: str, dataset_id: str, dbname: str, schemana
                              overwrite=False, auto_create_table=False)
                              
     return "SUCCESS: Profiling complete."
-';
+';;

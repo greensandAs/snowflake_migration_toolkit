@@ -108,4 +108,4 @@ def generate_dq_categorical_relationship_rules_handler(session: Session, dataset
 
     except Exception as e:
         return {"status": "error", "message": str(e)}
-';
+';;

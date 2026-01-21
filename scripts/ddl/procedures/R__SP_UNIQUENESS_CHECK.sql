@@ -332,4 +332,4 @@ EXCEPTION
         VALUES (COALESCE(:v_run_id, -1), COALESCE(:v_check_config_id, -1), COALESCE(:v_procedure_name, ''SP_UNIQUENESS_CHECK2''), ''UNKNOWN'', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), ''FAILED'', SQLERRM);
         RETURN 400;
 END;
-';
+';;

@@ -242,4 +242,4 @@ EXCEPTION
     WHEN OTHER THEN
         RETURN COALESCE(v_execution_error, 400);
 END;
-';
+';;

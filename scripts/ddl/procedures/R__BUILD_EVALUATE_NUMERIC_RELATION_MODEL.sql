@@ -109,4 +109,4 @@ def build_and_evaluate_model_handler(session, dataset_name: str, feature_list: l
 
     results["status"] = "success"
     return results
-';
+';;

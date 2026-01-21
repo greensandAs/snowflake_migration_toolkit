@@ -373,4 +373,4 @@ EXCEPTION
         VALUES (COALESCE(:v_run_id, -1), COALESCE(:v_check_config_id, -1), COALESCE(:v_procedure_name, ''SP_REGEX_NOT_MATCH_CHECK''), COALESCE(:v_step, ''UNKNOWN''), CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), ''FAILED'', :v_error_message);
         RETURN COALESCE(v_execution_error, 400);
 END;
-';
+';;

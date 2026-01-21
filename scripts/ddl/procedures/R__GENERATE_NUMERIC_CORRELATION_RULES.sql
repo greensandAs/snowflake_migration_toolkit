@@ -7,4 +7,4 @@ RUNTIME_VERSION = '3.11'
 PACKAGES = ('pandas','numpy','snowflake-snowpark-python')
 HANDLER = 'generate_numeric_correlation_rules_handler'
 EXECUTE AS OWNER
-AS '';
+AS '';;

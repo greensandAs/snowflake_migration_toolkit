@@ -506,4 +506,4 @@ EXCEPTION
         END;
         RETURN COALESCE(v_execution_error, 400);
 END;
-';
+';;
