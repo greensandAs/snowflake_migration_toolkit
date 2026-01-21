@@ -1,7 +1,6 @@
 import snowflake.connector
 import os
 import re
-import sqlfluff
 from config import SOURCE_CONFIG, OUTPUT_DIR_DDL
 
 # Output Folders
@@ -31,44 +30,26 @@ def save_file(folder, filename, content):
         f.write(content.strip())
     print(f"   📄 Generated: {filename}")
 
-def run_batch_linting():
-    """Iterates through all generated folders and applies SQLFluff Fix"""
-    print("\n🧹 Starting Batch Linting & Formatting...")
-    
-    # List of folders to process
-    target_folders = FOLDERS.values()
-    
-    for folder in target_folders:
-        if not os.path.exists(folder):
-            continue
-            
-        print(f"   📂 Processing folder: {os.path.basename(folder)}...")
-        
-        # Walk through files
-        for filename in os.listdir(folder):
-            if filename.endswith(".sql"):
-                file_path = os.path.join(folder, filename)
-                
-                try:
-                    # Read Raw
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        raw_sql = f.read()
-                    
-                    # Fix (Lint)
-                    # We wrap this in try/except so one bad file doesn't crash the pipeline
-                    fixed_sql = sqlfluff.fix(raw_sql, dialect='snowflake')
-                    
-                    # Overwrite with Cleaned SQL
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        f.write(fixed_sql)
-                        
-                except Exception as e:
-                    print(f"      ⚠️ Could not format {filename}: {e}")
-
-    print("✨ Batch Linting Complete")
-
+# ---------------------------------------------------------
+# ✅ FIXED CLEAN_DDL FUNCTION
+# ---------------------------------------------------------
 def clean_ddl(text):
-    return re.sub(r'([a-zA-Z0-9_"]+\.)([a-zA-Z0-9_"]+\.)(?=[a-zA-Z0-9_"]+)', "", text)
+    """
+    Removes ONLY the specific Source DB and Schema prefixes.
+    This prevents breaking Python imports like 'snowflake.snowpark.functions'.
+    """
+    db = SOURCE_CONFIG['database']
+    schema = SOURCE_CONFIG['schema']
+    
+    # Construct a regex that targets ONLY your specific DB and Schema
+    # Logic: (?i) = Case Insensitive
+    #        (?:\"?...) = Non-capturing group for the name with optional quotes
+    #        re.escape(...) = Safely handle special chars in names
+    pattern = rf'(?i)(?:\"?{re.escape(db)}\"?\.)(?:\"?{re.escape(schema)}\"?\.)'
+    
+    # Replace found patterns with empty string
+    return re.sub(pattern, "", text)
+# ---------------------------------------------------------
 
 def clean_signature(signature_string):
     if " RETURN " in signature_string:
@@ -178,10 +159,6 @@ def main():
 
     finally:
         conn.close()
-        
-        # --- EXECUTE BATCH LINTING AT THE END ---
-        run_batch_linting() 
-        # ----------------------------------------
 
 if __name__ == "__main__":
     main()
