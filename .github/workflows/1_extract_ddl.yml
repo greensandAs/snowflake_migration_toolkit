@@ -26,7 +26,7 @@ jobs:
           python-version: ${{ inputs.python_version }}
           
       - name: Install Dependencies
-        run: pip install snowflake-connector-python pandas
+        run: pip install -r requirements.txt
 
       - name: Run DDL Extraction Script
         env:
