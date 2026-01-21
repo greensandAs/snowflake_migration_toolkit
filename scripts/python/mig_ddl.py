@@ -1,9 +1,10 @@
 import snowflake.connector
 import os
 import re
+import sqlfluff  
 from config import SOURCE_CONFIG, OUTPUT_DIR_DDL
 
-# Output Folders
+# Output Folders 
 FOLDERS = {
     "DDL": OUTPUT_DIR_DDL,
     "PROC": os.path.join(OUTPUT_DIR_DDL, "procedures"),
@@ -12,6 +13,7 @@ FOLDERS = {
 }
 
 def get_connection():
+    
     print(f"🔌 Connecting to SOURCE: {SOURCE_CONFIG['account']}...")
     return snowflake.connector.connect(
         user=SOURCE_CONFIG['user'],
@@ -23,22 +25,39 @@ def get_connection():
         role=SOURCE_CONFIG['role']
     )
 
+def format_sql(sql_text):
+    """
+    Uses SQLFluff to auto-format (fix) the SQL string.
+    Returns the cleaned SQL.
+    """
+    try:
+        # 'fix' automatically corrects indentation, casing, etc.
+        fixed_sql = sqlfluff.fix(sql_text, dialect='snowflake')
+        return fixed_sql
+    except Exception as e:
+        print(f"   ⚠️ SQLFluff warning: Could not format SQL. Saving raw version. Error: {e}")
+        return sql_text
+
 def save_file(folder, filename, content):
     os.makedirs(folder, exist_ok=True)
+    
+    # --- NEW: Format before saving ---
+    print(f"   🧹 Linting & Fixing {filename}...")
+    formatted_content = format_sql(content.strip())
+    # ---------------------------------
+
     with open(os.path.join(folder, filename), "w", encoding="utf-8") as f:
-        f.write(content.strip())
+        f.write(formatted_content)
     print(f"   📄 Saved: {filename}")
 
 def clean_ddl(text):
-    """Removes Database.Schema. prefix via Regex to make DDL portable"""
     return re.sub(r'([a-zA-Z0-9_"]+\.)([a-zA-Z0-9_"]+\.)(?=[a-zA-Z0-9_"]+)', "", text)
 
 def clean_signature(signature_string):
-    """Cleans the return type from signature for GET_DDL calls"""
     if " RETURN " in signature_string:
         return signature_string.split(" RETURN ")[0]
     return signature_string
-
+    
 def main():
     conn = get_connection()
     cur = conn.cursor()
