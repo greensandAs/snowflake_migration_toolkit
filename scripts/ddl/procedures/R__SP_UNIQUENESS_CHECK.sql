@@ -296,7 +296,7 @@ BEGIN
     IF (v_error_message IS NULL) THEN
         BEGIN
             LET v_details_obj VARIANT := OBJECT_CONSTRUCT(''column'', v_column_nm, ''mostly'', v_allowed_deviation);
-            LET v_results_obj VARIANT := OBJECT_CONSTRUCT(''element_count'', v_total, ''unexpected_count'', v_unexpected, ''unexpected_percent'', v_percent * 100);
+            LET v_results_obj VARIANT := OBJECT_CONSTRUCT(''element_count'', v_total, ''unexpected_count'', v_unexpected, ''unexpected_percent'', v_percent * 100,''failed_records_table'', v_failed_records_table,''missing_count'', v_missing_count);
 
             LET v_safe_details_str STRING := REPLACE(REPLACE(TO_JSON(v_details_obj), ''\\\\'', ''\\\\\\\\''), ''\\'''', ''\\''\\'''');
             LET v_safe_results_str STRING := REPLACE(REPLACE(TO_JSON(v_results_obj), ''\\\\'', ''\\\\\\\\''), ''\\'''', ''\\''\\'''');

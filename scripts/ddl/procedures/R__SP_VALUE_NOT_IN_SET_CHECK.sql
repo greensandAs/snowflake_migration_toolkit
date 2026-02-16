@@ -138,7 +138,12 @@ BEGIN
         v_data_asset_name := RULE:DATASET_NAME::STRING;
         v_expectation_name := RULE:EXPECTATION_NAME::STRING;
         v_kwargs_variant := PARSE_JSON(RULE:KWARGS);
-        v_value_set_list := v_kwargs_variant:value_set::ARRAY;
+        IF (IS_ARRAY(v_kwargs_variant:value_set)) THEN
+            v_value_set_list := v_kwargs_variant:value_set::ARRAY;
+        ELSE
+            -- If it arrives as a string "[...]", parse it into a real array
+            v_value_set_list := PARSE_JSON(v_kwargs_variant:value_set::STRING)::ARRAY;
+        END IF;
         v_allowed_deviation := COALESCE(v_kwargs_variant:mostly::FLOAT, 1.0);
         v_failed_rows_cnt_limit := v_kwargs_variant:failed_row_count::NUMBER;
         v_dataset_type := RULE:DATASET_TYPE::STRING;

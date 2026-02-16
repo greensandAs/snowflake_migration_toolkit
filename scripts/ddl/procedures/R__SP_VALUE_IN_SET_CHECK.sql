@@ -96,6 +96,7 @@ BEGIN
             v_execution_error := config_record.EXECUTION_ERROR;
             BREAK;
         END FOR;
+
         
         IF (v_dq_db_name IS NULL OR v_dq_schema_name IS NULL OR v_success_code IS NULL OR v_failed_code IS NULL OR v_execution_error IS NULL ) THEN
             v_error_message := ''Required Configurtion parameter is missing or NULL. Please check DQ_JOB_EXEC_CONFIG'';
@@ -138,7 +139,14 @@ BEGIN
         v_data_asset_name := RULE:DATASET_NAME::STRING;
         v_expectation_name := RULE:EXPECTATION_NAME::STRING;
         v_kwargs_variant := PARSE_JSON(RULE:KWARGS);
-        v_value_set_list := v_kwargs_variant:value_set::ARRAY;
+        
+        IF (IS_ARRAY(v_kwargs_variant:value_set)) THEN
+            v_value_set_list := v_kwargs_variant:value_set::ARRAY;
+        ELSE
+            -- If it arrives as a string "[...]", parse it into a real array
+            v_value_set_list := PARSE_JSON(v_kwargs_variant:value_set::STRING)::ARRAY;
+        END IF;
+        
         v_allowed_deviation := COALESCE(v_kwargs_variant:mostly::FLOAT, 1.0);
         v_failed_rows_cnt_limit := v_kwargs_variant:failed_row_count::NUMBER;
         v_dataset_type := RULE:DATASET_TYPE::STRING;
@@ -153,6 +161,8 @@ BEGIN
         v_incr_date_col_1 := RULE:INCR_DATE_COLUMN_1::STRING;
         v_incr_date_col_2 := RULE:INCR_DATE_COLUMN_2::STRING;
         v_last_validated_ts := RULE:LAST_VALIDATED_TIMESTAMP::TIMESTAMP_NTZ;
+
+        
 
         -- Validate required parameters based on dataset type
         IF (UPPER(v_dataset_type) = ''TABLE'' AND (v_database_name IS NULL OR v_schema_name IS NULL OR v_table_name IS NULL)) THEN

@@ -268,54 +268,108 @@ def main(session: snowpark.Session, P_DATASET_ID, P_PARALLEL_JOBS):
         master_audit_logs.append((run_id, "EXECUTE_DQ_RULES_MASTER", "SQL_EXECUTION", log_message, step_start_time, step_end_time, log_status, error_message))
 
     # =========================================================================
-    # DATASET-LEVEL CONSOLIDATED FILE GENERATION
+    # DATASET-LEVEL CONSOLIDATED FILE GENERATION 
     # =========================================================================
-    generated_file_url = "NULL"
-    file_generation_error = False  # Flag to track file generation issues
-    
+    file_generation_error = False
     if failure_count > 0:
         step_start_time = datetime.datetime.now()
         try:
-            # 1. Construct the standard failure table name based on Dataset Name
+            # 1. Prepare Table Names and Paths
             clean_dataset_name = re.sub(r''[^a-zA-Z0-9]'', ''_'', data_asset["DATASET_NAME"])
             failure_table_name = f"{q_ident(config[''DQ_DB_NAME''])}.{q_ident(config[''DQ_SCHEMA_NAME''])}.{clean_dataset_name}_DQ_FAILURE"
+            export_file_path = f"dataset_failures/FAILED_ROWS_{clean_dataset_name}_{run_id}.csv.gz"
+            final_file_name = f"''{export_file_path}''"
+
+            # 2. Fetch Metadata for dynamic headers
+            rules_config_table = f"{FRAMEWORK_PATH}.DQ_RULE_CONFIG"
+            exp_master_table = f"{FRAMEWORK_PATH}.DQ_EXPECTATION_MASTER"
             
-            # 2. Define File Name and Stage Path
-            export_file_name = f"FAILED_ROWS_{clean_dataset_name}_{run_id}.csv.gz"
-            export_file_path = f"dataset_failures/{export_file_name}"
-            
-            # 3. Aggregated COPY INTO (NO LIMIT)
-            # CAUTION: Removing Limit on SINGLE=TRUE file generation.
-            
+            failed_rules_metadata = session.sql(f"""
+                SELECT 
+                    r.RULE_CONFIG_ID, 
+                    cc.EXPECTATION_ID,
+                    cc.KWARGS,
+                    COALESCE(UPPER(REPLACE(cc.COLUMN_NAME, '' '', ''_'')), ''TABLE'') as COL_NAME,
+                    COALESCE(em.CHECK_TYPE, ''UNCATEROIZED'') as CATEGORY,
+                    COALESCE(em.DIMENSION, ''UNCATEROIZED'') as DIMENSION
+                FROM {FRAMEWORK_PATH}.DQ_RULE_RESULTS r
+                JOIN {rules_config_table} cc ON r.RULE_CONFIG_ID = cc.RULE_CONFIG_ID
+                JOIN {exp_master_table} em ON cc.EXPECTATION_ID = em.EXPECTATION_ID
+                WHERE r.DATASET_RUN_ID = {run_id} AND r.IS_SUCCESS = FALSE
+            """).collect()
+
+            # 3. Build Dynamic Headers: [COLUMN]_[CATEGORY]_[RULE_ID]
+            dynamic_cols = []
+            for r in failed_rules_metadata:
+                category = r[''CATEGORY'']
+                rule_id = r[''RULE_CONFIG_ID'']
+                col_name = r[''COL_NAME'']
+                dimension = r[''DIMENSION'']
+                kwargs_json = r[''KWARGS'']
+                
+                # --- Dynamic Header Logic ---
+                if kwargs_json:
+                    try:
+                        args = json.loads(kwargs_json)
+                        
+                        # A. Handle ID 10 (Range Check)
+                        if r[''EXPECTATION_ID''] == 10:
+                            vmin = args.get(''min_value'', ''MIN'')
+                            vmax = args.get(''max_value'', ''MAX'')
+                            category = f"{category}({vmin}_{vmax})"
+                        
+                        # B. Handle ID 7 (Datatype Check)
+                        elif r[''EXPECTATION_ID''] == 7:
+                            target_type = args.get(''type_'', ''UNKNOWN'')
+                            category = f"{category}({target_type})"
+                            
+                        # C. Handle ID 18 (Length Check)
+                        elif r[''EXPECTATION_ID''] == 18:
+                            lmin = args.get(''min_value'', ''MIN'')
+                            lmax = args.get(''max_value'', ''MAX'')
+                            category = f"{category}({lmin}_{lmax})"
+                            
+                    except:
+                        pass 
+
+                header = f''"{col_name}_{dimension}_{category}_{rule_id}"''
+                # FAIL/PASS Logic
+                col_sql = f"CASE WHEN MAX(IFF(RULE_CONFIG_ID = {rule_id}, 1, 0)) = 1 THEN ''FAIL'' ELSE ''PASS'' END AS {header}"
+                dynamic_cols.append(col_sql)
+
+            pivot_sql_fragment = ", ".join(dynamic_cols)
+
+            # 4. Final COPY INTO (Metadata Added at the End)
             copy_sql = f"""
                 COPY INTO {DQ_STAGE_NAME}/{export_file_path}
                 FROM (
-                    SELECT * FROM {failure_table_name} 
-                    WHERE DATASET_RUN_ID = {run_id}
+                    SELECT 
+                        -- C. Run Metadata (At the End)
+                        {run_id} AS DATASET_RUN_ID,
+                        {P_DATASET_ID} AS DATASET_ID,
+                        ''{data_asset[''DATASET_NAME'']}'' AS DATASET_NAME,
+                        CURRENT_TIMESTAMP() AS EXPORT_TIMESTAMP,
+                        
+                        -- B. Rule Audit Flags (Aggregates)
+                        {pivot_sql_fragment},
+                        
+                        -- A. Original Data (Grouping Keys)
+                        f.* EXCLUDE (RULE_CONFIG_ID, DATASET_RUN_ID, DATASET_ID, DQ_LOAD_TIMESTAMP)
+                          
+                    FROM {failure_table_name} f
+                    WHERE f.DATASET_RUN_ID = {run_id}
+                    GROUP BY ALL
                 )
-                FILE_FORMAT = (TYPE = CSV, compression=''gzip'', FIELD_OPTIONALLY_ENCLOSED_BY = ''"'')
+                FILE_FORMAT = (TYPE = CSV compression=''gzip'' FIELD_OPTIONALLY_ENCLOSED_BY = ''"'' BINARY_FORMAT = ''UTF8'')
                 HEADER = TRUE
                 SINGLE = TRUE
                 OVERWRITE = TRUE
                 MAX_FILE_SIZE = 5368709120
             """
             session.sql(copy_sql).collect()
-            
-            # 4. Generate Presigned URL (7 days validity)
-            url_sql = f"SELECT GET_PRESIGNED_URL(''{DQ_STAGE_NAME}'', ''{export_file_path}'', 604800)"
-            url_result = session.sql(url_sql).collect()
-            
-            if url_result:
-                raw_url = url_result[0][0]
-                generated_file_url = f"''{raw_url}''" # Quote for SQL insert
-                
-            master_audit_logs.append((run_id, "EXECUTE_DQ_RULES_MASTER", "GENERATE_FAILED_FILE", f"Generated consolidated file: {export_file_name}", step_start_time, datetime.datetime.now(), "COMPLETED", None))
-            
-        except Exception as e:
-            file_generation_error = True # Mark as critical error
-            master_audit_logs.append((run_id, "EXECUTE_DQ_RULES_MASTER", "GENERATE_FAILED_FILE", f"CRITICAL: Failed to generate consolidated file: {str(e)}", step_start_time, datetime.datetime.now(), "FAILED", str(e)))
 
-    # =========================================================================
+        except Exception as e:
+            file_generation_error = True
     
     end_time = datetime.datetime.now()
     run_time_seconds = (end_time - master_start_time).total_seconds()
@@ -336,8 +390,8 @@ def main(session: snowpark.Session, P_DATASET_ID, P_PARALLEL_JOBS):
     
     final_insert_sql = f"""
         INSERT INTO {run_log_table_path} 
-        (DATASET_RUN_ID, DATASET_ID, RUN_TIME, EVALUATED_EXPECTATIONS, SUCCESSFULL_EXPECTATIONS, UNSUCCESSFULL_EXPECTATIONS, RUN_STATUS, CREATED_BY, SUCCESS_PERCENT, CREATED_TIMESTAMP, FAILED_FILE_URL) 
-        VALUES ({run_id}, {P_DATASET_ID}, {run_time_seconds}, {total_rules}, {success_count}, {failure_count}, ''{final_status}'', ''{session.get_current_user()}'', {success_percent}, ''{master_start_time}'', {generated_file_url})
+        (DATASET_RUN_ID, DATASET_ID, RUN_TIME, EVALUATED_EXPECTATIONS, SUCCESSFULL_EXPECTATIONS, UNSUCCESSFULL_EXPECTATIONS, RUN_STATUS, CREATED_BY, SUCCESS_PERCENT, CREATED_TIMESTAMP, FAILURE_FILE) 
+        VALUES ({run_id}, {P_DATASET_ID}, {run_time_seconds}, {total_rules}, {success_count}, {failure_count}, ''{final_status}'', ''{session.get_current_user()}'', {success_percent}, ''{master_start_time}'',{final_file_name})
     """
     session.sql(final_insert_sql).collect()
 

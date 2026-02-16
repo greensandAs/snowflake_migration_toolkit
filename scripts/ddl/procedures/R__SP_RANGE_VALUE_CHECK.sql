@@ -195,8 +195,8 @@ BEGIN
             RETURN v_status_code;
     END;
 
-    v_min_operator := CASE WHEN v_strict_min THEN ''<'' ELSE ''<='' END;
-    v_max_operator := CASE WHEN v_strict_max THEN ''>'' ELSE ''>='' END;
+    v_min_operator := CASE WHEN v_strict_min THEN ''<='' ELSE ''<'' END;
+    v_max_operator := CASE WHEN v_strict_max THEN ''>='' ELSE ''>'' END;
     UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = ''Input rule - parsing completed'' WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
 
     -- 3. Execute the main data quality check query
