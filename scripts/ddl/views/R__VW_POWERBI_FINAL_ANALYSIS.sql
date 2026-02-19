@@ -1,0 +1,81 @@
+USE DATABASE {{ snowflake_database }};
+
+USE SCHEMA {{ snowflake_schema }};
+
+CREATE OR REPLACE VIEW VW_POWERBI_FINAL_ANALYSIS (
+    DATASET_ID,
+    KPI_ID,
+    MICROSEGMENT_DEF_ID,
+    MICROSEGMENT_ID,
+    MICROSEGMENT_PROFILER_SNAPSHOT_ID,
+    METRIC_VALUE,
+    TIME_VALUE,
+    CATEGORICAL_LEGEND,
+    IS_ANOMALY,
+    ANOMALY_DETECTION_METHOD,
+    WITHIN_MICROSEGMENT_ANOMALY_REASON,
+    ACROSS_MICROSEGMENT_ANOMALY_REASON
+) AS
+WITH FLATTENED_ATTRIBUTES AS (
+    -- 1. Explode the JSON into Key-Value pairs
+    SELECT
+        D.DATASET_ID,
+        D.KPI_ID,
+        D.MICROSEGMENT_DEF_ID,
+        D.MICROSEGMENT_ID,
+        D.MICROSEGMENT_PROFILER_SNAPSHOT_ID,
+        f.KEY AS ATTR_NAME,
+        f.VALUE::STRING AS ATTR_VALUE
+    FROM MICROSEGMENT_DETAILS D,
+        LATERAL FLATTEN(input => PARSE_JSON(D.MICROSEGMENT_PROFILE)) f
+),
+
+MAPPED_DATA AS (
+    -- 2. Categorize the keys based on common patterns in your data
+    -- Metric: Usually ends in _AGG or _SUM
+    -- Time: Usually contains _DT_ or _GRAIN
+    -- Category: Everything else
+    SELECT
+        DATASET_ID,
+        KPI_ID,
+        MICROSEGMENT_DEF_ID,
+        MICROSEGMENT_ID,
+        MICROSEGMENT_PROFILER_SNAPSHOT_ID,
+
+        -- Identify Metric (looks for numeric values or AGG suffix)
+        MAX(CASE
+            WHEN ATTR_NAME LIKE '%_AGG' OR ATTR_NAME LIKE '%_SUM' THEN TRY_TO_DOUBLE(ATTR_VALUE)
+        END) AS METRIC_VALUE,
+
+        -- Identify Time (looks for date-like strings or GRAIN suffix)
+        MAX(CASE
+            WHEN ATTR_NAME LIKE '%_GRAIN' OR ATTR_NAME LIKE '%_DT_%' THEN TRY_TO_DATE(ATTR_VALUE)
+        END) AS TIME_VALUE,
+
+        -- Identify Categories (Concatenate all keys that aren't Metric or Time)
+        LISTAGG(CASE
+            WHEN
+                ATTR_NAME NOT LIKE '%_AGG'
+                AND ATTR_NAME NOT LIKE '%_SUM'
+                AND ATTR_NAME NOT LIKE '%_GRAIN'
+                AND ATTR_NAME NOT LIKE '%_DT_%' THEN ATTR_VALUE
+        END, ' | ') WITHIN GROUP (ORDER BY ATTR_NAME) AS CATEGORICAL_LEGEND
+    FROM FLATTENED_ATTRIBUTES
+    GROUP BY 1, 2, 3, 4, 5
+)
+
+-- 3. Final Join with Anomalies Table
+SELECT
+    M.*,
+    COALESCE(A.IS_WITHIN_ANOMALY, FALSE) OR COALESCE(A.IS_ACROSS_ANOMALY, FALSE) AS IS_ANOMALY,
+    A.ANOMALY_DETECTION_METHOD,
+    A.WITHIN_MICROSEGMENT_ANOMALY_REASON,
+    A.ACROSS_MICROSEGMENT_ANOMALY_REASON
+FROM MAPPED_DATA M
+LEFT JOIN MICROSEGMENT_ANOMALIES A
+    ON
+        M.DATASET_ID = A.DATASET_ID
+        AND M.KPI_ID = A.KPI_ID
+        AND M.MICROSEGMENT_DEF_ID = A.MICROSEGMENT_DEF_ID
+        AND M.MICROSEGMENT_ID = A.MICROSEGMENT_ID
+        AND M.MICROSEGMENT_PROFILER_SNAPSHOT_ID = A.MICROSEGMENT_PROFILER_SNAPSHOT_ID;
