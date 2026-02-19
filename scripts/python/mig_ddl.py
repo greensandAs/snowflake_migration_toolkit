@@ -98,7 +98,8 @@ def main():
         print("\n👁️ Extracting Views...")
         try:
             cur.execute(f"SHOW VIEWS")
-            views = [r[1] for r in cur.fetchall() if r[5] == SOURCE_CONFIG['owner_role']]
+            # views = [r[1] for r in cur.fetchall() if r[5] == SOURCE_CONFIG['owner_role']]
+            views = [r[1] for r in cur.fetchall()]
             for v in views:
                 cur.execute(f"SELECT GET_DDL('VIEW', '\"{v}\"')")
                 ddl = clean_ddl(cur.fetchone()[0])
