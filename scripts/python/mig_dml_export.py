@@ -17,10 +17,11 @@ def main():
     )
     cur = conn.cursor()
     
-    # Ensure export directory exists
+    # Ensure export directory exists locally
     os.makedirs(OUTPUT_DIR_DATA, exist_ok=True)
-    # Absolute path is required for the Snowflake GET command
-    abs_path = os.path.abspath(OUTPUT_DIR_DATA) 
+    
+    # FIX 1: Get absolute path and force forward slashes (Crucial for Snowflake GET)
+    abs_path = os.path.abspath(OUTPUT_DIR_DATA).replace('\\', '/')
 
     try:
         cur.execute(f"USE SCHEMA {SOURCE_CONFIG['database']}.{SOURCE_CONFIG['schema']}")
@@ -32,12 +33,11 @@ def main():
         """)
 
         for table in DATA_TABLES_TO_EXPORT:
-            print(f"📦 Exporting Table: {table}")
+            print(f"\n📦 Exporting Table: {table}")
             filename = f"{table}.csv.gz"
             
             # 1. Unload Data (Server-Side)
-            print(f"   -> Unloading to Stage...")
-            # SINGLE=TRUE is fine for config tables. For massive data tables >5GB, remove it.
+            print(f"   -> Unloading to Stage @{TEMP_STAGE}...")
             cur.execute(f"""
                 COPY INTO @{TEMP_STAGE}/{filename} 
                 FROM "{table}" 
@@ -47,8 +47,22 @@ def main():
             """)
             
             # 2. Download Data (Stage -> Local)
-            print(f"   -> Downloading to {abs_path}...")
-            cur.execute(f"GET @{TEMP_STAGE}/{filename} file://{abs_path}")
+            # FIX 2: Added the trailing slash '/' after {abs_path}
+            print(f"   -> Downloading to file://{abs_path}/...")
+            cur.execute(f"GET @{TEMP_STAGE}/{filename} file://{abs_path}/")
+            
+            # 3. Print the results to the console/GitHub Actions log
+            download_results = cur.fetchall()
+            if not download_results:
+                print("   ⚠️ WARNING: GET command executed, but no files were downloaded!")
+            else:
+                for row in download_results:
+                    # row format: [file_name, file_size, return_status, message]
+                    print(f"      ✅ Downloaded: {row[0]} | Status: {row[2]} | Size: {row[1]} bytes")
+            
+    except Exception as e:
+        print(f"\n❌ Error during export: {e}")
+        exit(1) # Force the pipeline to fail if there's an error
             
     finally:
         conn.close()
