@@ -43,9 +43,13 @@ jobs:
           git config --global user.name 'GitHub Actions'
           git config --global user.email 'actions@github.com'
           
-          # Add the specific folder where CSVs are saved
-          git add data_exports/
+          # --- THE FIX ---
+          # Use --force to override .gitignore rules!
+          git add --force data_exports/
           
-          # [skip ci] is a safety mechanism to prevent infinite workflow loops
+          # Debugging: This will print exactly what files Git found
+          git status
+          
+          # Commit and Push
           git commit -m "chore: Auto-generated Data extraction [skip ci]" || echo "No changes to commit"
           git push
