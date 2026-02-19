@@ -43,4 +43,4 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 
 # Destination folders for generated files
 OUTPUT_DIR_DDL = os.path.join(REPO_ROOT, "scripts", "ddl")
-OUTPUT_DIR_DATA = os.path.join(REPO_ROOT, "data_exports")
+OUTPUT_DIR_DATA = os.path.join(REPO_ROOT, "data_exports_latest")
