@@ -82,7 +82,8 @@ def main():
         print("\n📦 Extracting Tables...")
         try:
             cur.execute(f"SHOW TABLES")
-            tables = [r[1] for r in cur.fetchall() if r[9] == SOURCE_CONFIG['owner_role'] and not r[1].endswith('DQ_FAILURE')]
+            # tables = [r[1] for r in cur.fetchall() if r[9] == SOURCE_CONFIG['owner_role'] and not r[1].endswith('DQ_FAILURE')]
+            tables = [r[1] for r in cur.fetchall() if not r[1].endswith('DQ_FAILURE')]
             for t in tables:
                 cur.execute(f"SELECT GET_DDL('TABLE', '\"{t}\"')")
                 ddl = clean_ddl(cur.fetchone()[0])
