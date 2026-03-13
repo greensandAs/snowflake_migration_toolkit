@@ -210,7 +210,8 @@ BEGIN
         v_from_clause := ''"'' || v_database_name || ''"."'' || v_schema_name || ''"."'' || v_table_name || ''"'';
     END IF;
 
-    v_where_clause_condition := ''"'' || v_column_nm || ''" IS NULL'';
+    v_where_clause_condition := ''("'' || v_column_nm || ''" IS NULL OR TRIM("'' || v_column_nm || ''") = '''''''')'';
+
 
     -- Query modified to include the incremental filter
     v_sql := ''SELECT

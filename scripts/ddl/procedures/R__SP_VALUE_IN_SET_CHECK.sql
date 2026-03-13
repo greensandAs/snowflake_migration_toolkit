@@ -233,7 +233,7 @@ BEGIN
         v_from_clause := ''"'' || v_database_name || ''"."'' || v_schema_name || ''"."'' || v_table_name || ''"'';
     END IF;
 
-    v_where_clause_condition := ''"'' || v_column_nm || ''" IS NOT NULL AND CAST("'' || v_column_nm || ''" AS VARCHAR) NOT IN ('' || v_in_set_condition || '')'';
+    v_where_clause_condition := ''"'' || v_column_nm || ''" IS NULL OR CAST("'' || v_column_nm || ''" AS VARCHAR) NOT IN ('' || v_in_set_condition || '')'';
 
     v_sql := ''SELECT
                  COUNT(*) AS total_count,

@@ -145,8 +145,23 @@ BEGIN
 
         v_kwargs_variant := PARSE_JSON(RULE:KWARGS);
         
-        -- Directly extract the column_set ARRAY from the variant.
-        v_expected_columns := v_kwargs_variant:column_set::ARRAY;
+        -- Handle column_set as either array or string format
+        -- Use CS: prefix for case-sensitive columns, e.g., ["SCORE", "CS:TextCol"]
+        LET column_set_raw VARIANT := v_kwargs_variant:column_set;
+        IF (TYPEOF(column_set_raw) = ''VARCHAR'' OR TYPEOF(column_set_raw) = ''STRING'') THEN
+            LET column_set_str STRING := column_set_raw::STRING;
+            -- Simply convert single quotes to double quotes for JSON
+            column_set_str := REPLACE(column_set_str, CHR(39), CHR(34));
+            v_expected_columns := TRY_PARSE_JSON(column_set_str)::ARRAY;
+            IF (v_expected_columns IS NULL) THEN
+                v_error_message := ''Failed to parse column_set. Use format: ["COL1", "COL2", "CS:CaseSensitiveCol"]'';
+                v_status_code := v_execution_error;
+                UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''FAILED'', ERROR_MESSAGE = :v_error_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+                RETURN v_status_code;
+            END IF;
+        ELSE
+            v_expected_columns := column_set_raw::ARRAY;
+        END IF;
         
         v_exact_match := COALESCE(v_kwargs_variant:exact_match::BOOLEAN, TRUE);
         v_allowed_deviation := COALESCE(v_kwargs_variant:mostly::FLOAT, 1.0);
@@ -218,64 +233,65 @@ BEGIN
                 RETURN v_status_code;
             END IF;
             
-            -- Expected Set Processing (Case Normalization: UPPER for unquoted, preserve case for quoted)
-            SELECT ARRAY_AGG(
-                TRIM(value::STRING) 
-            )
-            INTO v_comparison_set_expected
+            -- Expected Set Processing: Use CS: prefix for case-sensitive columns
+            -- Separate into case-sensitive and case-insensitive sets
+            LET cs_expected ARRAY;
+            LET ci_expected ARRAY;
+            
+            SELECT 
+                ARRAY_AGG(CASE WHEN TRIM(value::STRING) LIKE ''CS:%'' THEN SUBSTR(TRIM(value::STRING), 4) END),
+                ARRAY_AGG(CASE WHEN TRIM(value::STRING) NOT LIKE ''CS:%'' THEN UPPER(TRIM(value::STRING)) END)
+            INTO cs_expected, ci_expected
             FROM TABLE(FLATTEN(input => :v_expected_columns));
             
-            v_total := ARRAY_SIZE(v_comparison_set_expected); -- Set total based on processed array
+            -- Remove NULLs from arrays
+            cs_expected := COALESCE(ARRAY_COMPACT(cs_expected), ARRAY_CONSTRUCT());
+            ci_expected := COALESCE(ARRAY_COMPACT(ci_expected), ARRAY_CONSTRUCT());
             
-            IF (v_total = 0) THEN
-                v_error_message := ''The provided column_set is empty or contains only NULL/empty values.'';
-                v_status_code := v_execution_error;
-                UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''FAILED'', ERROR_MESSAGE = :v_error_message, LOG_MESSAGE = :v_input_rule_str WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
-                RETURN v_status_code;
-            END IF;
-
-            -- Actual Set Processing (Case Normalization: UPPER for unquoted, preserve case for quoted)
-            SELECT ARRAY_AGG(
-                TRIM(value::STRING)
-            )
-            INTO v_comparison_set_actual
+            -- Actual columns - separate into matching sets
+            LET actual_original ARRAY;
+            LET actual_upper ARRAY;
+            
+            SELECT 
+                ARRAY_AGG(TRIM(value::STRING)),
+                ARRAY_AGG(UPPER(TRIM(value::STRING)))
+            INTO actual_original, actual_upper
             FROM TABLE(FLATTEN(input => :v_actual_columns));
             
-            -- Prepare quoted array strings for safe dynamic injection (logic embedded)
-            LET expected_array_quoted STRING := '''''''' || REPLACE(TO_VARCHAR(v_comparison_set_expected), '''''''''', '''''''''''''') || '''''''' ;
-            LET actual_array_quoted STRING := '''''''' || REPLACE(TO_VARCHAR(v_comparison_set_actual), '''''''''', '''''''''''''') || '''''''' ;
-
-            -- Combined calculation and comparison logic into a single dynamic SELECT
-            -- FIX: Explicitly use PARSE_JSON to convert the string literal back to an ARRAY type
-            v_sql := ''
-SELECT
-    ARRAY_EXCEPT(PARSE_JSON('' || expected_array_quoted || '')::ARRAY, PARSE_JSON('' || actual_array_quoted || '')::ARRAY) AS MISSING_COLS,
-    ARRAY_EXCEPT(PARSE_JSON('' || actual_array_quoted || '')::ARRAY, PARSE_JSON('' || expected_array_quoted || '')::ARRAY) AS UNEXPECTED_COLS,
-    (
-        ARRAY_SIZE(ARRAY_EXCEPT(PARSE_JSON('' || expected_array_quoted || '')::ARRAY, PARSE_JSON('' || actual_array_quoted || '')::ARRAY)) +
-        ARRAY_SIZE(ARRAY_EXCEPT(PARSE_JSON('' || actual_array_quoted || '')::ARRAY, PARSE_JSON('' || expected_array_quoted || '')::ARRAY))
-    ) AS TOTAL_MISMATCHES,
-    CASE
-        -- Check 1: Missing columns fail if the count exceeds allowed deviation
-        WHEN ARRAY_SIZE(ARRAY_EXCEPT(PARSE_JSON('' || expected_array_quoted || '')::ARRAY, PARSE_JSON('' || actual_array_quoted || '')::ARRAY)) > (1 - '' || v_allowed_deviation || '') * '' || v_total || '' THEN FALSE
-        -- Check 2: Unexpected columns fail if exact_match is true AND count exceeds deviation
-        WHEN '' || v_exact_match || '' AND ARRAY_SIZE(ARRAY_EXCEPT(PARSE_JSON('' || actual_array_quoted || '')::ARRAY, PARSE_JSON('' || expected_array_quoted || '')::ARRAY)) > (1 - '' || v_allowed_deviation || '') * '' || v_total || '' THEN FALSE
-        ELSE TRUE
-    END AS SUCCESS_FLAG,
-    (
-        ARRAY_SIZE(ARRAY_EXCEPT(PARSE_JSON('' || expected_array_quoted || '')::ARRAY, PARSE_JSON('' || actual_array_quoted || '')::ARRAY)) +
-        ARRAY_SIZE(ARRAY_EXCEPT(PARSE_JSON('' || actual_array_quoted || '')::ARRAY, PARSE_JSON('' || expected_array_quoted || '')::ARRAY))
-    )::FLOAT / NULLIF('' || v_total || ''::FLOAT, 0) AS PERCENT_MISMATCH
-'';
+            -- Check case-sensitive columns against original actual
+            LET cs_missing ARRAY := ARRAY_EXCEPT(cs_expected, actual_original);
+            -- Check case-insensitive columns against uppercased actual  
+            LET ci_missing ARRAY := ARRAY_EXCEPT(ci_expected, actual_upper);
             
-            v_result := (EXECUTE IMMEDIATE v_sql);
-
-            -- Fetch all calculated results into variables
-            SELECT
-                MISSING_COLS, UNEXPECTED_COLS, TOTAL_MISMATCHES, SUCCESS_FLAG, PERCENT_MISMATCH
-            INTO
-                v_missing_columns, v_unexpected_columns, v_unexpected, v_success_flag, v_percent
-            FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+            -- Combine missing columns
+            v_missing_columns := ARRAY_CAT(COALESCE(cs_missing, ARRAY_CONSTRUCT()), COALESCE(ci_missing, ARRAY_CONSTRUCT()));
+            
+            -- For unexpected columns: uppercase the CS expected for comparison
+            LET cs_expected_upper ARRAY;
+            SELECT ARRAY_AGG(UPPER(value::STRING)) INTO cs_expected_upper FROM TABLE(FLATTEN(input => :cs_expected));
+            cs_expected_upper := COALESCE(cs_expected_upper, ARRAY_CONSTRUCT());
+            
+            -- All expected columns in uppercase for comparison
+            LET all_expected_upper ARRAY := ARRAY_CAT(cs_expected_upper, ci_expected);
+            
+            -- Unexpected = actual columns (uppercased) not in expected (uppercased)
+            v_unexpected_columns := ARRAY_EXCEPT(actual_upper, all_expected_upper);
+            IF (v_unexpected_columns IS NULL) THEN
+                v_unexpected_columns := ARRAY_CONSTRUCT();
+            END IF;
+            
+            v_comparison_set_expected := ARRAY_CAT(cs_expected, ci_expected);
+            v_comparison_set_actual := actual_original;
+            
+            v_total := ARRAY_SIZE(v_comparison_set_expected);
+            v_unexpected := ARRAY_SIZE(v_missing_columns) + ARRAY_SIZE(v_unexpected_columns);
+            
+            -- Determine success
+            LET missing_count INT := ARRAY_SIZE(v_missing_columns);
+            LET unexpected_count INT := ARRAY_SIZE(v_unexpected_columns);
+            
+            v_success_flag := (missing_count = 0) AND (NOT v_exact_match OR unexpected_count = 0);
+            v_percent := v_unexpected::FLOAT / NULLIF(v_total::FLOAT, 0);
 
             v_log_message := CASE WHEN v_success_flag THEN ''Column set check passed.'' ELSE ''Column set check failed due to mismatch.'' END;
             
@@ -300,10 +316,18 @@ SELECT
     ----------------------------------------------------------------------------------------------------
     -- 4 & 5. Failed record/key capture (Skipped - Not applicable for metadata checks)
     v_step := ''SKIPPING_FAILED_ROW_CAPTURE'';
-    v_log_message := ''Not applicable. Failed row/key capture is not performed for metadata checks.'';
-    INSERT INTO DQ_RULE_AUDIT_LOG (DATASET_RUN_ID, RULE_CONFIG_ID, PROCEDURE_NAME, STEP_NAME, START_TIMESTAMP, END_TIMESTAMP, STATUS, LOG_MESSAGE)
-    VALUES (:v_run_id, :v_check_config_id, :v_procedure_name, :v_step, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), ''COMPLETED'', :v_log_message);
-    v_failed_records_table := ''No Failed Records'';
+    BEGIN
+        v_log_message := ''Not applicable. Failed row/key capture is not performed for metadata checks.'';
+        INSERT INTO DQ_RULE_AUDIT_LOG (DATASET_RUN_ID, RULE_CONFIG_ID, PROCEDURE_NAME, STEP_NAME, START_TIMESTAMP, END_TIMESTAMP, STATUS, LOG_MESSAGE)
+        VALUES (:v_run_id, :v_check_config_id, :v_procedure_name, :v_step, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), ''COMPLETED'', :v_log_message);
+        v_failed_records_table := ''No Failed Records'';
+    EXCEPTION
+        WHEN OTHER THEN
+            v_error_message := ''Error in failed row capture step: '' || SQLERRM;
+            v_status_code := v_execution_error;
+            UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''FAILED'', ERROR_MESSAGE = :v_error_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+            RETURN v_status_code;
+    END;
 
     ----------------------------------------------------------------------------------------------------
     -- 6. Insert Results into the DQ_RULE_RESULTS Table 
@@ -313,53 +337,39 @@ SELECT
 
     IF (v_error_message IS NULL) THEN
         BEGIN
-            -- Using TO_JSON to ensure array elements are properly quoted inside the JSON strings
-            LET expected_cols_json_str STRING := COALESCE(TO_JSON(v_expected_columns), ''null'');
-            LET missing_cols_json_str STRING := COALESCE(TO_JSON(v_missing_columns), ''[]'');
-            LET unexpected_cols_json_str STRING := COALESCE(TO_JSON(v_unexpected_columns), ''[]'');
+            -- Build JSON objects directly as VARIANT types
+            LET details_variant VARIANT := OBJECT_CONSTRUCT(
+                ''expected_column_set'', v_expected_columns,
+                ''exact_match'', v_exact_match
+            );
             
-            LET details_json_str STRING := ''{'' ||
-                ''"expected_column_set": '' || expected_cols_json_str || '','' ||
-                ''"exact_match": '' || COALESCE(v_exact_match::STRING, ''false'') ||
-            ''}'' ;
+            LET results_variant VARIANT := OBJECT_CONSTRUCT(
+                ''expected_count'', v_total,
+                ''actual_count'', v_actual_total,
+                ''set_mismatch_count'', v_unexpected,
+                ''missing_column_count'', ARRAY_SIZE(v_missing_columns),
+                ''unexpected_column_count'', ARRAY_SIZE(v_unexpected_columns),
+                ''missing_columns'', v_missing_columns,
+                ''unexpected_columns'', v_unexpected_columns,
+                ''failed_records_table'', ''Schema level Check - No Failed Records''
+            );
             
-            LET results_json_str STRING := ''{'' ||
-                ''"expected_count": '' || COALESCE(v_total::STRING, ''null'') || '','' ||
-                ''"actual_count": '' || COALESCE(v_actual_total::STRING, ''null'') || '','' ||
-                ''"set_mismatch_count": '' || COALESCE(v_unexpected::STRING, ''0'') || '','' ||
-                ''"missing_column_count": '' || COALESCE(ARRAY_SIZE(v_missing_columns)::STRING, ''0'') || '','' ||
-                ''"unexpected_column_count": '' || COALESCE(ARRAY_SIZE(v_unexpected_columns)::STRING, ''0'') || '','' ||
-                ''"missing_columns": '' || missing_cols_json_str || '','' ||
-                ''"unexpected_columns": '' || unexpected_cols_json_str ||
-                ''"failed_records_table": Schema level Check - No Failed Records'' ||
-            ''}'';
-
-            -- Prepare variables for safe dynamic injection, replacing single quotes with double single quotes
-            LET escaped_results_json_str STRING := REPLACE(results_json_str, '''''''', '''''''''''');
-            LET escaped_details_json_str STRING := REPLACE(details_json_str, '''''''', '''''''''''');
-            LET escaped_rule_str STRING := REPLACE(COALESCE(RULE::STRING, ''null''), '''''''', '''''''''''');
+            LET is_success BOOLEAN := (v_status_code = v_success_code);
+            LET rule_variant VARIANT := RULE;
+            LET observed_variant VARIANT := v_observed_value;
             
-            -- FIX for OBSERVED_VALUE: Wrap the TO_VARCHAR output of the array in single quotes and escape internal quotes
-            LET escaped_observed_value STRING := '''''''' || COALESCE(REPLACE(TO_VARCHAR(v_observed_value), '''''''', ''''''''''''), ''NULL'') || ''''''''; 
-
-            v_sql := ''INSERT INTO "'' || v_dq_db_name || ''"."'' || v_dq_schema_name || ''".DQ_RULE_RESULTS (
+            -- Direct INSERT into the results table
+            INSERT INTO DQ_RULE_RESULTS (
                 BATCH_ID, DATASET_RUN_ID, DATASET_ID, RULE_CONFIG_ID, EXPECTATION_ID, RUN_NAME, RUN_TIMESTAMP, DATASET_NAME,
                 EXPECATION_CONFIG, IS_SUCCESS, RESULTS, EXPECTATION_NAME, DETAILS, ELEMENT_COUNT,
                 UNEXPECTED_COUNT, UNEXPECTED_PERCENT, UNEXPECTED_PERCENT_NONMISSING, UNEXPECTED_PERCENT_TOTAL,
                 OBSERVED_VALUE, FAILED_ROWS
-                )
-                SELECT
-                '' || COALESCE(v_batch_id::STRING, ''null'') || '', '' ||
-                COALESCE(v_run_id::STRING, ''null'') || '', '' ||
-                COALESCE(v_data_asset_id::STRING, ''null'') || '', '' ||
-                COALESCE(v_check_config_id::STRING, ''null'') || '', '' ||
-                COALESCE(v_expectation_id::STRING, ''null'') || '', '''''' || REPLACE(COALESCE(v_run_name, ''null''), '''''''', '''''''''''') || '''''', CURRENT_TIMESTAMP(), '''''' || REPLACE(COALESCE(v_data_asset_name, ''null''), '''''''', '''''''''''') || '''''', PARSE_JSON('''''' || escaped_rule_str || ''''''), '' || CASE WHEN v_status_code = v_success_code THEN ''TRUE'' ELSE ''FALSE'' END || '', PARSE_JSON('''''' || escaped_results_json_str || ''''''), '''''' || REPLACE(COALESCE(v_expectation_name, ''null''), '''''''', '''''''''''') || '''''', PARSE_JSON('''''' || escaped_details_json_str || ''''''), '' ||
-                COALESCE(''null'', ''null'') || '', '' ||
-                COALESCE(''null'', ''null'') || '', '' ||
-                COALESCE(''null'', ''null'') || '', NULL::FLOAT, NULL::FLOAT, PARSE_JSON('''''' ||
-                v_observed_value || '''''')::VARIANT, NULL::VARIANT'';
-
-            EXECUTE IMMEDIATE v_sql;
+            )
+            SELECT 
+                :v_batch_id, :v_run_id, :v_data_asset_id, :v_check_config_id, :v_expectation_id, 
+                :v_run_name, CURRENT_TIMESTAMP(), :v_data_asset_name,
+                :rule_variant, :is_success, :results_variant, :v_expectation_name, :details_variant, :v_total,
+                NULL, NULL, NULL, NULL, :observed_variant, NULL;
         EXCEPTION
             WHEN OTHER THEN
                 v_error_message := ''Failed to insert into DQ_RULE_RESULTS: '' || SQLERRM;

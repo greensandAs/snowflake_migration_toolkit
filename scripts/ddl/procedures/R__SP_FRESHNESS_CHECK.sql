@@ -131,7 +131,7 @@ BEGIN
         v_dimension := RULE:DIMENSION;
 
         -- EXPECTATION-SPECIFIC PARAMETER PARSING 
-        v_freshness_threshold_amount := v_kwargs_variant:freshness_threshold_amount::INT;
+        v_freshness_threshold_amount := v_kwargs_variant:freshness_threshold_value::INT;
         v_freshness_threshold_unit := v_kwargs_variant:freshness_threshold_unit::STRING;
         v_timezone := COALESCE(v_kwargs_variant:timezone::STRING, ''UTC'');
 

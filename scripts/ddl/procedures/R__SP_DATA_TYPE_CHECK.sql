@@ -64,6 +64,23 @@ DECLARE
     v_clean_dataset_name STRING;
     v_full_target_table_name STRING;
 
+    -- Column profile metrics for error records
+    v_column_profile VARIANT;
+    v_value_counts VARIANT;
+    v_col_unique_count NUMBER;
+    v_col_unique_percent FLOAT;
+
+    -- Missing count variables
+    v_missing_count NUMBER DEFAULT 0;
+    v_missing_percent FLOAT DEFAULT 0;
+    v_unexpected_percent_total FLOAT DEFAULT 0;
+    v_unexpected_percent_nonmissing FLOAT DEFAULT 0;
+
+    -- TYPE DETECTION VARIABLE (for same-type comparison handling)
+    v_actual_column_type STRING;
+    v_type_match_flag BOOLEAN DEFAULT FALSE;
+    v_unsupported_conversion_flag BOOLEAN DEFAULT FALSE;
+
 BEGIN
     v_input_rule_str := TO_VARCHAR(RULE);
 
@@ -190,40 +207,333 @@ BEGIN
         v_from_clause := ''"'' || v_database_name || ''"."'' || v_schema_name || ''"."'' || v_table_name || ''"'';
     END IF;
 
-    -- Define the failure condition: Value is NOT NULL AND TRY_CAST fails.
-    v_where_clause_condition := v_column_nm || '' IS NOT NULL AND TRY_CAST('' || v_column_nm || '' AS '' || v_type_expected || '') IS NULL'';
+    -- Check if column type matches expected type (to avoid TRY_CAST same-type error)
+    IF (v_dataset_type = ''TABLE'') THEN
+        BEGIN
+            v_sql := ''SELECT DATA_TYPE FROM "'' || v_database_name || ''".INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '''''' || v_schema_name || '''''' AND TABLE_NAME = '''''' || v_table_name || '''''' AND UPPER(COLUMN_NAME) = '''''' || UPPER(v_column_nm) || '''''''';
+            v_result := (EXECUTE IMMEDIATE v_sql);
+            LET v_type_cursor CURSOR FOR v_result;
+            FOR type_record IN v_type_cursor DO
+                v_actual_column_type := UPPER(type_record.DATA_TYPE);
+                BREAK;
+            END FOR;
+            
+            -- Check for type compatibility: same type OR safe conversions where TRY_CAST fails
+            IF (v_actual_column_type LIKE ''%'' || v_type_expected || ''%'' OR v_type_expected LIKE ''%'' || SPLIT_PART(v_actual_column_type, ''('', 1) || ''%'') THEN
+                v_type_match_flag := TRUE;
+            -- NUMBER/INT/FLOAT to VARCHAR/STRING always succeeds (TRY_CAST not supported but conversion always works)
+            ELSEIF ((v_actual_column_type LIKE ''NUMBER%'' OR v_actual_column_type LIKE ''INT%'' OR v_actual_column_type LIKE ''FLOAT%'' OR v_actual_column_type LIKE ''DECIMAL%'' OR v_actual_column_type LIKE ''DOUBLE%'') 
+                    AND (v_type_expected IN (''VARCHAR'', ''STRING'', ''TEXT'', ''CHAR''))) THEN
+                v_type_match_flag := TRUE;
+            -- NUMBER to DATE/TIMESTAMP: TRY_CAST not supported - mark as failed with 100% failure rate
+            ELSEIF ((v_actual_column_type LIKE ''NUMBER%'' OR v_actual_column_type LIKE ''INT%'' OR v_actual_column_type LIKE ''FLOAT%'' OR v_actual_column_type LIKE ''DECIMAL%'' OR v_actual_column_type LIKE ''DOUBLE%'') 
+                    AND (v_type_expected IN (''DATE'', ''TIMESTAMP'', ''TIMESTAMP_NTZ'', ''TIMESTAMP_LTZ'', ''TIMESTAMP_TZ'', ''TIME''))) THEN
+                -- Get total count for the failure metrics
+                v_sql := ''SELECT COUNT(*) AS total_count FROM '' || v_from_clause;
+                v_result := (EXECUTE IMMEDIATE v_sql);
+                LET v_unsupported_cursor CURSOR FOR v_result;
+                FOR unsupported_record IN v_unsupported_cursor DO
+                    v_total := COALESCE(unsupported_record.total_count, 0);
+                    BREAK;
+                END FOR;
+                v_unexpected := v_total;
+                v_percent := 1.0;
+                v_status_code := v_failed_code;
+                v_log_message := ''Column '' || v_column_nm || '' has type '' || v_actual_column_type || ''. TRY_CAST does not support conversion to '' || v_type_expected || ''. All rows marked as failed.'';
+                v_failed_records_table := ''Unsupported conversion - all rows failed'';
+                v_unsupported_conversion_flag := TRUE;
+                UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+            -- DATE/TIMESTAMP to VARCHAR/STRING always succeeds
+            ELSEIF ((v_actual_column_type LIKE ''DATE%'' OR v_actual_column_type LIKE ''TIMESTAMP%'' OR v_actual_column_type LIKE ''TIME%'') 
+                    AND (v_type_expected IN (''VARCHAR'', ''STRING'', ''TEXT'', ''CHAR''))) THEN
+                v_type_match_flag := TRUE;
+            -- DATE/TIMESTAMP to NUMBER: TRY_CAST not supported - mark as failed
+            ELSEIF ((v_actual_column_type LIKE ''DATE%'' OR v_actual_column_type LIKE ''TIMESTAMP%'' OR v_actual_column_type LIKE ''TIME%'') 
+                    AND (v_type_expected IN (''NUMBER'', ''INT'', ''INTEGER'', ''FLOAT'', ''DECIMAL'', ''DOUBLE''))) THEN
+                v_sql := ''SELECT COUNT(*) AS total_count FROM '' || v_from_clause;
+                v_result := (EXECUTE IMMEDIATE v_sql);
+                LET v_dt_num_cursor CURSOR FOR v_result;
+                FOR dt_num_record IN v_dt_num_cursor DO
+                    v_total := COALESCE(dt_num_record.total_count, 0);
+                    BREAK;
+                END FOR;
+                v_unexpected := v_total;
+                v_percent := 1.0;
+                v_status_code := v_failed_code;
+                v_log_message := ''Column '' || v_column_nm || '' has type '' || v_actual_column_type || ''. TRY_CAST does not support conversion to '' || v_type_expected || ''. All rows marked as failed.'';
+                v_failed_records_table := ''Unsupported conversion - all rows failed'';
+                v_unsupported_conversion_flag := TRUE;
+                UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+            -- DATE/TIMESTAMP to BOOLEAN: TRY_CAST not supported - mark as failed
+            ELSEIF ((v_actual_column_type LIKE ''DATE%'' OR v_actual_column_type LIKE ''TIMESTAMP%'' OR v_actual_column_type LIKE ''TIME%'') 
+                    AND (v_type_expected = ''BOOLEAN'')) THEN
+                v_sql := ''SELECT COUNT(*) AS total_count FROM '' || v_from_clause;
+                v_result := (EXECUTE IMMEDIATE v_sql);
+                LET v_dt_bool_cursor CURSOR FOR v_result;
+                FOR dt_bool_record IN v_dt_bool_cursor DO
+                    v_total := COALESCE(dt_bool_record.total_count, 0);
+                    BREAK;
+                END FOR;
+                v_unexpected := v_total;
+                v_percent := 1.0;
+                v_status_code := v_failed_code;
+                v_log_message := ''Column '' || v_column_nm || '' has type '' || v_actual_column_type || ''. TRY_CAST does not support conversion to BOOLEAN. All rows marked as failed.'';
+                v_failed_records_table := ''Unsupported conversion - all rows failed'';
+                v_unsupported_conversion_flag := TRUE;
+                UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+            -- BOOLEAN to VARCHAR/STRING always succeeds
+            ELSEIF (v_actual_column_type = ''BOOLEAN'' AND (v_type_expected IN (''VARCHAR'', ''STRING'', ''TEXT'', ''CHAR''))) THEN
+                v_type_match_flag := TRUE;
+            -- BOOLEAN to NUMBER: TRY_CAST not supported - mark as failed
+            ELSEIF (v_actual_column_type = ''BOOLEAN'' AND (v_type_expected IN (''NUMBER'', ''INT'', ''INTEGER'', ''FLOAT'', ''DECIMAL'', ''DOUBLE''))) THEN
+                v_sql := ''SELECT COUNT(*) AS total_count FROM '' || v_from_clause;
+                v_result := (EXECUTE IMMEDIATE v_sql);
+                LET v_bool_num_cursor CURSOR FOR v_result;
+                FOR bool_num_record IN v_bool_num_cursor DO
+                    v_total := COALESCE(bool_num_record.total_count, 0);
+                    BREAK;
+                END FOR;
+                v_unexpected := v_total;
+                v_percent := 1.0;
+                v_status_code := v_failed_code;
+                v_log_message := ''Column '' || v_column_nm || '' has type BOOLEAN. TRY_CAST does not support conversion to '' || v_type_expected || ''. All rows marked as failed.'';
+                v_failed_records_table := ''Unsupported conversion - all rows failed'';
+                v_unsupported_conversion_flag := TRUE;
+                UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+            -- BOOLEAN to DATE/TIMESTAMP: TRY_CAST not supported - mark as failed
+            ELSEIF (v_actual_column_type = ''BOOLEAN'' AND (v_type_expected IN (''DATE'', ''TIMESTAMP'', ''TIMESTAMP_NTZ'', ''TIMESTAMP_LTZ'', ''TIMESTAMP_TZ'', ''TIME''))) THEN
+                v_sql := ''SELECT COUNT(*) AS total_count FROM '' || v_from_clause;
+                v_result := (EXECUTE IMMEDIATE v_sql);
+                LET v_bool_dt_cursor CURSOR FOR v_result;
+                FOR bool_dt_record IN v_bool_dt_cursor DO
+                    v_total := COALESCE(bool_dt_record.total_count, 0);
+                    BREAK;
+                END FOR;
+                v_unexpected := v_total;
+                v_percent := 1.0;
+                v_status_code := v_failed_code;
+                v_log_message := ''Column '' || v_column_nm || '' has type BOOLEAN. TRY_CAST does not support conversion to '' || v_type_expected || ''. All rows marked as failed.'';
+                v_failed_records_table := ''Unsupported conversion - all rows failed'';
+                v_unsupported_conversion_flag := TRUE;
+                UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+            -- NUMBER to BOOLEAN: TRY_CAST not supported - mark as failed
+            ELSEIF ((v_actual_column_type LIKE ''NUMBER%'' OR v_actual_column_type LIKE ''INT%'' OR v_actual_column_type LIKE ''FLOAT%'' OR v_actual_column_type LIKE ''DECIMAL%'' OR v_actual_column_type LIKE ''DOUBLE%'') 
+                    AND (v_type_expected = ''BOOLEAN'')) THEN
+                v_sql := ''SELECT COUNT(*) AS total_count FROM '' || v_from_clause;
+                v_result := (EXECUTE IMMEDIATE v_sql);
+                LET v_num_bool_cursor CURSOR FOR v_result;
+                FOR num_bool_record IN v_num_bool_cursor DO
+                    v_total := COALESCE(num_bool_record.total_count, 0);
+                    BREAK;
+                END FOR;
+                v_unexpected := v_total;
+                v_percent := 1.0;
+                v_status_code := v_failed_code;
+                v_log_message := ''Column '' || v_column_nm || '' has type '' || v_actual_column_type || ''. TRY_CAST does not support conversion to BOOLEAN. All rows marked as failed.'';
+                v_failed_records_table := ''Unsupported conversion - all rows failed'';
+                v_unsupported_conversion_flag := TRUE;
+                UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+            END IF;
+        EXCEPTION
+            WHEN OTHER THEN
+                v_type_match_flag := FALSE;
+        END;
+    ELSEIF (v_dataset_type = ''QUERY'') THEN
+        BEGIN
+            -- For QUERY type, get column type using DESCRIBE RESULT
+            v_sql := ''SELECT * FROM ('' || v_sql_query || '') WHERE 1=0'';
+            EXECUTE IMMEDIATE v_sql;
+            
+            -- Use DESCRIBE RESULT to get column metadata
+            EXECUTE IMMEDIATE ''DESCRIBE RESULT LAST_QUERY_ID()'';
+            v_sql := ''SELECT "type" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) WHERE UPPER("name") = '''''' || UPPER(v_column_nm) || '''''''';
+            v_result := (EXECUTE IMMEDIATE v_sql);
+            LET v_query_type_cursor CURSOR FOR v_result;
+            FOR query_type_record IN v_query_type_cursor DO
+                v_actual_column_type := UPPER(query_type_record."type");
+                BREAK;
+            END FOR;
+            
+            -- Apply same type matching logic as TABLE type
+            IF (v_actual_column_type LIKE ''%'' || v_type_expected || ''%'' OR v_type_expected LIKE ''%'' || SPLIT_PART(v_actual_column_type, ''('', 1) || ''%'') THEN
+                v_type_match_flag := TRUE;
+            ELSEIF ((v_actual_column_type LIKE ''NUMBER%'' OR v_actual_column_type LIKE ''INT%'' OR v_actual_column_type LIKE ''FLOAT%'' OR v_actual_column_type LIKE ''DECIMAL%'' OR v_actual_column_type LIKE ''DOUBLE%'') 
+                    AND (v_type_expected IN (''VARCHAR'', ''STRING'', ''TEXT'', ''CHAR''))) THEN
+                v_type_match_flag := TRUE;
+            ELSEIF ((v_actual_column_type LIKE ''NUMBER%'' OR v_actual_column_type LIKE ''INT%'' OR v_actual_column_type LIKE ''FLOAT%'' OR v_actual_column_type LIKE ''DECIMAL%'' OR v_actual_column_type LIKE ''DOUBLE%'') 
+                    AND (v_type_expected IN (''DATE'', ''TIMESTAMP'', ''TIMESTAMP_NTZ'', ''TIMESTAMP_LTZ'', ''TIMESTAMP_TZ'', ''TIME''))) THEN
+                v_sql := ''SELECT COUNT(*) AS total_count FROM '' || v_from_clause;
+                v_result := (EXECUTE IMMEDIATE v_sql);
+                LET v_q_unsupported_cursor CURSOR FOR v_result;
+                FOR q_unsupported_record IN v_q_unsupported_cursor DO
+                    v_total := COALESCE(q_unsupported_record.total_count, 0);
+                    BREAK;
+                END FOR;
+                v_unexpected := v_total;
+                v_percent := 1.0;
+                v_status_code := v_failed_code;
+                v_log_message := ''Column '' || v_column_nm || '' has type '' || v_actual_column_type || ''. TRY_CAST does not support conversion to '' || v_type_expected || ''. All rows marked as failed.'';
+                v_failed_records_table := ''Unsupported conversion - all rows failed'';
+                v_unsupported_conversion_flag := TRUE;
+                UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+            ELSEIF ((v_actual_column_type LIKE ''DATE%'' OR v_actual_column_type LIKE ''TIMESTAMP%'' OR v_actual_column_type LIKE ''TIME%'') 
+                    AND (v_type_expected IN (''VARCHAR'', ''STRING'', ''TEXT'', ''CHAR''))) THEN
+                v_type_match_flag := TRUE;
+            ELSEIF ((v_actual_column_type LIKE ''DATE%'' OR v_actual_column_type LIKE ''TIMESTAMP%'' OR v_actual_column_type LIKE ''TIME%'') 
+                    AND (v_type_expected IN (''NUMBER'', ''INT'', ''INTEGER'', ''FLOAT'', ''DECIMAL'', ''DOUBLE''))) THEN
+                v_sql := ''SELECT COUNT(*) AS total_count FROM '' || v_from_clause;
+                v_result := (EXECUTE IMMEDIATE v_sql);
+                LET v_q_dt_num_cursor CURSOR FOR v_result;
+                FOR q_dt_num_record IN v_q_dt_num_cursor DO
+                    v_total := COALESCE(q_dt_num_record.total_count, 0);
+                    BREAK;
+                END FOR;
+                v_unexpected := v_total;
+                v_percent := 1.0;
+                v_status_code := v_failed_code;
+                v_log_message := ''Column '' || v_column_nm || '' has type '' || v_actual_column_type || ''. TRY_CAST does not support conversion to '' || v_type_expected || ''. All rows marked as failed.'';
+                v_failed_records_table := ''Unsupported conversion - all rows failed'';
+                v_unsupported_conversion_flag := TRUE;
+                UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+            ELSEIF ((v_actual_column_type LIKE ''DATE%'' OR v_actual_column_type LIKE ''TIMESTAMP%'' OR v_actual_column_type LIKE ''TIME%'') 
+                    AND (v_type_expected = ''BOOLEAN'')) THEN
+                v_sql := ''SELECT COUNT(*) AS total_count FROM '' || v_from_clause;
+                v_result := (EXECUTE IMMEDIATE v_sql);
+                LET v_q_dt_bool_cursor CURSOR FOR v_result;
+                FOR q_dt_bool_record IN v_q_dt_bool_cursor DO
+                    v_total := COALESCE(q_dt_bool_record.total_count, 0);
+                    BREAK;
+                END FOR;
+                v_unexpected := v_total;
+                v_percent := 1.0;
+                v_status_code := v_failed_code;
+                v_log_message := ''Column '' || v_column_nm || '' has type '' || v_actual_column_type || ''. TRY_CAST does not support conversion to BOOLEAN. All rows marked as failed.'';
+                v_failed_records_table := ''Unsupported conversion - all rows failed'';
+                v_unsupported_conversion_flag := TRUE;
+                UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+            ELSEIF (v_actual_column_type = ''BOOLEAN'' AND (v_type_expected IN (''VARCHAR'', ''STRING'', ''TEXT'', ''CHAR''))) THEN
+                v_type_match_flag := TRUE;
+            ELSEIF (v_actual_column_type = ''BOOLEAN'' AND (v_type_expected IN (''NUMBER'', ''INT'', ''INTEGER'', ''FLOAT'', ''DECIMAL'', ''DOUBLE''))) THEN
+                v_sql := ''SELECT COUNT(*) AS total_count FROM '' || v_from_clause;
+                v_result := (EXECUTE IMMEDIATE v_sql);
+                LET v_q_bool_num_cursor CURSOR FOR v_result;
+                FOR q_bool_num_record IN v_q_bool_num_cursor DO
+                    v_total := COALESCE(q_bool_num_record.total_count, 0);
+                    BREAK;
+                END FOR;
+                v_unexpected := v_total;
+                v_percent := 1.0;
+                v_status_code := v_failed_code;
+                v_log_message := ''Column '' || v_column_nm || '' has type BOOLEAN. TRY_CAST does not support conversion to '' || v_type_expected || ''. All rows marked as failed.'';
+                v_failed_records_table := ''Unsupported conversion - all rows failed'';
+                v_unsupported_conversion_flag := TRUE;
+                UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+            ELSEIF (v_actual_column_type = ''BOOLEAN'' AND (v_type_expected IN (''DATE'', ''TIMESTAMP'', ''TIMESTAMP_NTZ'', ''TIMESTAMP_LTZ'', ''TIMESTAMP_TZ'', ''TIME''))) THEN
+                v_sql := ''SELECT COUNT(*) AS total_count FROM '' || v_from_clause;
+                v_result := (EXECUTE IMMEDIATE v_sql);
+                LET v_q_bool_dt_cursor CURSOR FOR v_result;
+                FOR q_bool_dt_record IN v_q_bool_dt_cursor DO
+                    v_total := COALESCE(q_bool_dt_record.total_count, 0);
+                    BREAK;
+                END FOR;
+                v_unexpected := v_total;
+                v_percent := 1.0;
+                v_status_code := v_failed_code;
+                v_log_message := ''Column '' || v_column_nm || '' has type BOOLEAN. TRY_CAST does not support conversion to '' || v_type_expected || ''. All rows marked as failed.'';
+                v_failed_records_table := ''Unsupported conversion - all rows failed'';
+                v_unsupported_conversion_flag := TRUE;
+                UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+            ELSEIF ((v_actual_column_type LIKE ''NUMBER%'' OR v_actual_column_type LIKE ''INT%'' OR v_actual_column_type LIKE ''FLOAT%'' OR v_actual_column_type LIKE ''DECIMAL%'' OR v_actual_column_type LIKE ''DOUBLE%'') 
+                    AND (v_type_expected = ''BOOLEAN'')) THEN
+                v_sql := ''SELECT COUNT(*) AS total_count FROM '' || v_from_clause;
+                v_result := (EXECUTE IMMEDIATE v_sql);
+                LET v_q_num_bool_cursor CURSOR FOR v_result;
+                FOR q_num_bool_record IN v_q_num_bool_cursor DO
+                    v_total := COALESCE(q_num_bool_record.total_count, 0);
+                    BREAK;
+                END FOR;
+                v_unexpected := v_total;
+                v_percent := 1.0;
+                v_status_code := v_failed_code;
+                v_log_message := ''Column '' || v_column_nm || '' has type '' || v_actual_column_type || ''. TRY_CAST does not support conversion to BOOLEAN. All rows marked as failed.'';
+                v_failed_records_table := ''Unsupported conversion - all rows failed'';
+                v_unsupported_conversion_flag := TRUE;
+                UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+            END IF;
+        EXCEPTION
+            WHEN OTHER THEN
+                v_type_match_flag := FALSE;
+        END;
+    END IF;
 
-    v_sql := ''SELECT 
-                 COUNT(*) AS total_count,
-                 COUNT_IF('' || v_where_clause_condition || '') AS unexpected_count
-               FROM '' || v_from_clause;
+    -- If types match, auto-pass without TRY_CAST
+    -- If unsupported conversion, skip to results (already set as failed)
+    IF (v_unsupported_conversion_flag = TRUE) THEN
+        -- Skip to step 6 - results already set
+        NULL;
+    ELSEIF (v_type_match_flag = TRUE) THEN
+        BEGIN
+            v_sql := ''SELECT COUNT(*) AS total_count FROM '' || v_from_clause;
+            v_result := (EXECUTE IMMEDIATE v_sql);
+            LET v_count_cursor CURSOR FOR v_result;
+            FOR count_record IN v_count_cursor DO
+                v_total := COALESCE(count_record.total_count, 0);
+                BREAK;
+            END FOR;
+            v_unexpected := 0;
+            v_percent := 0;
+            v_status_code := v_success_code;
+            v_log_message := ''Column '' || v_column_nm || '' has type '' || v_actual_column_type || '' converting to '' || v_type_expected || ''. Safe conversion - check auto-passed.'';
+            UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+        EXCEPTION
+            WHEN OTHER THEN
+                v_error_message := ''Error getting row count for type-matched column: '' || SQLERRM;
+                v_status_code := v_execution_error;
+                UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''FAILED'', ERROR_MESSAGE = :v_error_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+                RETURN v_status_code;
+        END;
+    ELSE
+        -- Define the failure condition: Value is NOT NULL AND TRY_CAST fails.
+        v_where_clause_condition := ''"'' || v_column_nm || ''" IS NOT NULL AND TRIM("'' || v_column_nm || ''"::STRING) <> '''''''' AND TRY_CAST("'' || v_column_nm || ''" AS '' || v_type_expected || '') IS NULL'';
 
-    BEGIN
-        v_result := (EXECUTE IMMEDIATE v_sql);
-        LET v_cursor CURSOR FOR v_result;
-        
-        FOR record IN v_cursor DO
-            v_total := COALESCE(record.total_count, 0);
-            v_unexpected := COALESCE(record.unexpected_count, 0);
-            BREAK;
-        END FOR;
+        v_sql := ''SELECT 
+                     COUNT(*) AS total_count,
+                     COUNT_IF("'' || v_column_nm || ''" IS NULL OR TRIM("'' || v_column_nm || ''"::STRING) = '''''''') AS missing_count,
+                     COUNT_IF('' || v_where_clause_condition || '') AS unexpected_count
+                   FROM '' || v_from_clause;
 
-        v_percent := CASE WHEN v_total = 0 THEN 0 ELSE (v_unexpected::FLOAT / v_total) END;
-        
-        -- Check against the allowed deviation (mostly)
-        v_status_code := CASE WHEN v_percent <= (1 - v_allowed_deviation) THEN v_success_code ELSE v_failed_code END;
-        
-    EXCEPTION
-        WHEN OTHER THEN
-            v_error_message := ''Error in main query execution: '' || SQLERRM;
-            v_status_code := v_execution_error;
-            UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''FAILED'', ERROR_MESSAGE = :v_error_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
-            RETURN v_status_code;
-    END;
+        BEGIN
+            v_result := (EXECUTE IMMEDIATE v_sql);
+            LET v_cursor CURSOR FOR v_result;
+            
+            FOR record IN v_cursor DO
+                v_total := COALESCE(record.total_count, 0);
+                v_missing_count := COALESCE(record.missing_count, 0);
+                v_unexpected := COALESCE(record.unexpected_count, 0);
+                BREAK;
+            END FOR;
 
-    v_log_message := ''Column '' || v_column_nm || '' expected '' || v_type_expected || '' (mostly >= '' || v_allowed_deviation*100 || ''%). Found '' || v_unexpected || '' unexpected out of '' || v_total || '' rows ('' || ROUND(v_percent*100, 2) || ''%).'';
+            v_missing_percent := CASE WHEN v_total = 0 THEN 0 ELSE (v_missing_count::FLOAT / v_total) END;
+            v_percent := CASE WHEN v_total = 0 THEN 0 ELSE (v_unexpected::FLOAT / v_total) END;
+            v_unexpected_percent_total := v_percent;
+            v_unexpected_percent_nonmissing := CASE WHEN (v_total - v_missing_count) = 0 THEN 0 ELSE (v_unexpected::FLOAT / (v_total - v_missing_count)) END;
+            
+            -- Check against the allowed deviation (mostly)
+            v_status_code := CASE WHEN v_percent <= (1 - v_allowed_deviation) THEN v_success_code ELSE v_failed_code END;
+            
+        EXCEPTION
+            WHEN OTHER THEN
+                v_error_message := ''Error in main query execution: '' || SQLERRM;
+                v_status_code := v_execution_error;
+                UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''FAILED'', ERROR_MESSAGE = :v_error_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+                RETURN v_status_code;
+        END;
+    END IF;
 
-    UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+    IF (v_type_match_flag = FALSE) THEN
+        v_log_message := ''Column '' || v_column_nm || '' expected '' || v_type_expected || '' (mostly >= '' || v_allowed_deviation*100 || ''%). Found '' || v_unexpected || '' unexpected out of '' || v_total || '' rows ('' || ROUND(v_percent*100, 2) || ''%).'';
+        UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+    END IF;
 
     ----------------------------------------------------------------------------------------------------
     -- 4. Capture Failed Row Keys
@@ -265,13 +575,24 @@ BEGIN
                 FROM TABLE(SPLIT_TO_TABLE(:v_key_column_names, '',''));
                 v_key_construct_expr := ''OBJECT_CONSTRUCT('' || v_key_parts_list || '')'';
                 
-                v_sql := ''INSERT INTO DQ_FAILED_ROW_KEYS (DATASET_RUN_ID, RULE_CONFIG_ID, DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, FAILED_KEY) SELECT '' ||
-                         v_run_id || '', '' || v_check_config_id || '', '' ||
-                         '''''''' || COALESCE(v_database_name, ''N/A'') || '''''', '' || 
-                         '''''''' || COALESCE(v_schema_name, ''N/A'') || '''''', '' ||   
-                         '''''''' || COALESCE(v_table_name, ''N/A'') || '''''', '' ||   
-                         v_key_construct_expr ||
-                         '' FROM '' || v_from_clause || '' WHERE '' || v_where_clause_condition;
+                -- For unsupported conversions, capture ALL rows (no WHERE clause)
+                IF (v_unsupported_conversion_flag = TRUE) THEN
+                    v_sql := ''INSERT INTO DQ_FAILED_ROW_KEYS (DATASET_RUN_ID, RULE_CONFIG_ID, DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, FAILED_KEY) SELECT '' ||
+                             v_run_id || '', '' || v_check_config_id || '', '' ||
+                             '''''''' || COALESCE(v_database_name, ''N/A'') || '''''', '' || 
+                             '''''''' || COALESCE(v_schema_name, ''N/A'') || '''''', '' ||   
+                             '''''''' || COALESCE(v_table_name, ''N/A'') || '''''', '' ||   
+                             v_key_construct_expr ||
+                             '' FROM '' || v_from_clause;
+                ELSE
+                    v_sql := ''INSERT INTO DQ_FAILED_ROW_KEYS (DATASET_RUN_ID, RULE_CONFIG_ID, DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, FAILED_KEY) SELECT '' ||
+                             v_run_id || '', '' || v_check_config_id || '', '' ||
+                             '''''''' || COALESCE(v_database_name, ''N/A'') || '''''', '' || 
+                             '''''''' || COALESCE(v_schema_name, ''N/A'') || '''''', '' ||   
+                             '''''''' || COALESCE(v_table_name, ''N/A'') || '''''', '' ||   
+                             v_key_construct_expr ||
+                             '' FROM '' || v_from_clause || '' WHERE '' || v_where_clause_condition;
+                END IF;
                 
                 EXECUTE IMMEDIATE v_sql;
                 v_rows_inserted := SQLROWCOUNT;
@@ -318,15 +639,27 @@ BEGIN
             EXECUTE IMMEDIATE v_sql;
 
             -- 3. Insert Failed Records
-            v_sql := ''INSERT INTO '' || v_full_target_table_name || '' '' ||
-                     ''SELECT '' ||
-                     v_run_id || '', '' ||
-                     v_data_asset_id || '', '' ||
-                     v_check_config_id || '', '' ||
-                     ''CURRENT_TIMESTAMP(), '' ||
-                     '' * FROM '' || v_from_clause || 
-                     '' WHERE '' || v_where_clause_condition ||
-                     CASE WHEN v_failed_rows_cnt_limit > 0 THEN '' LIMIT '' || v_failed_rows_cnt_limit ELSE '''' END;
+            -- For unsupported conversions, insert ALL rows (no WHERE clause)
+            IF (v_unsupported_conversion_flag = TRUE) THEN
+                v_sql := ''INSERT INTO '' || v_full_target_table_name || '' '' ||
+                         ''SELECT '' ||
+                         v_run_id || '', '' ||
+                         v_data_asset_id || '', '' ||
+                         v_check_config_id || '', '' ||
+                         ''CURRENT_TIMESTAMP(), '' ||
+                         '' * FROM '' || v_from_clause ||
+                         CASE WHEN v_failed_rows_cnt_limit > 0 THEN '' LIMIT '' || v_failed_rows_cnt_limit ELSE '''' END;
+            ELSE
+                v_sql := ''INSERT INTO '' || v_full_target_table_name || '' '' ||
+                         ''SELECT '' ||
+                         v_run_id || '', '' ||
+                         v_data_asset_id || '', '' ||
+                         v_check_config_id || '', '' ||
+                         ''CURRENT_TIMESTAMP(), '' ||
+                         '' * FROM '' || v_from_clause || 
+                         '' WHERE '' || v_where_clause_condition ||
+                         CASE WHEN v_failed_rows_cnt_limit > 0 THEN '' LIMIT '' || v_failed_rows_cnt_limit ELSE '''' END;
+            END IF;
 
             EXECUTE IMMEDIATE v_sql;
             v_rows_inserted := SQLROWCOUNT;
@@ -347,6 +680,84 @@ BEGIN
 
     v_observed_value := NULL;
 
+    UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+
+    ----------------------------------------------------------------------------------------------------
+    -- 5b. Compute column profile metrics and value counts for error records
+    ----------------------------------------------------------------------------------------------------
+    v_step := ''COMPUTE_ERROR_METRICS'';
+    INSERT INTO DQ_RULE_AUDIT_LOG (DATASET_RUN_ID, RULE_CONFIG_ID, PROCEDURE_NAME, STEP_NAME, START_TIMESTAMP, STATUS, LOG_MESSAGE)
+    VALUES (:v_run_id, :v_check_config_id, :v_procedure_name, :v_step, CURRENT_TIMESTAMP(), ''STARTED'', ''Computing column profile metrics for error records'');
+    
+    IF (v_unexpected > 0 AND v_unsupported_conversion_flag = FALSE) THEN
+        BEGIN
+            -- Compute column profile metrics from failed records (without min/max)
+            v_sql := ''SELECT 
+                        COUNT(DISTINCT "'' || v_column_nm || ''") AS unique_cnt,
+                        CASE WHEN COUNT(*) > 0 THEN (COUNT(DISTINCT "'' || v_column_nm || ''")::FLOAT / COUNT(*)) * 100 ELSE 0 END AS unique_pct
+                      FROM '' || v_from_clause || '' WHERE '' || v_where_clause_condition;
+            
+            v_result := (EXECUTE IMMEDIATE v_sql);
+            LET v_profile_cursor CURSOR FOR v_result;
+            FOR profile_rec IN v_profile_cursor DO
+                v_col_unique_count := profile_rec.unique_cnt;
+                v_col_unique_percent := profile_rec.unique_pct;
+                BREAK;
+            END FOR;
+            
+            -- Build column profile VARIANT (without min/max values)
+            v_column_profile := OBJECT_CONSTRUCT(
+                ''column_name'', v_column_nm,
+                ''error_total_count'', v_unexpected,
+                ''error_unique_percent'', v_col_unique_percent,
+                ''error_unique_count'', v_col_unique_count,
+                ''missing_percentage'', v_missing_percent * 100,
+                ''missing_count'', v_missing_count
+            );
+            
+            -- Compute value counts (frequency of each distinct value excluding nulls and blanks)
+            v_sql := ''SELECT OBJECT_AGG(val, cnt) AS value_counts FROM (
+                        SELECT TRIM("'' || v_column_nm || ''"::STRING) AS val, COUNT(*) AS cnt 
+                        FROM '' || v_from_clause || '' 
+                        WHERE ('' || v_where_clause_condition || '') AND "'' || v_column_nm || ''" IS NOT NULL AND TRIM("'' || v_column_nm || ''"::STRING) <> ''''''''
+                        GROUP BY TRIM("'' || v_column_nm || ''"::STRING)
+                        ORDER BY cnt DESC
+                        LIMIT 1000
+                      )'';
+            
+            v_result := (EXECUTE IMMEDIATE v_sql);
+            LET v_vc_cursor CURSOR FOR v_result;
+            FOR vc_rec IN v_vc_cursor DO
+                v_value_counts := OBJECT_CONSTRUCT(''value_counts_without_nan'', vc_rec.value_counts);
+                BREAK;
+            END FOR;
+            
+            v_log_message := ''Column profile and value counts computed for error records'';
+        EXCEPTION
+            WHEN OTHER THEN
+                v_error_message := ''Error computing error metrics: '' || SQLERRM;
+                v_column_profile := NULL;
+                v_value_counts := NULL;
+                v_log_message := ''Warning: Could not compute error metrics - '' || SQLERRM;
+        END;
+    ELSEIF (v_unsupported_conversion_flag = TRUE) THEN
+        -- For unsupported conversions, populate column_profile with error details
+        v_column_profile := OBJECT_CONSTRUCT(
+            ''column_name'', v_column_nm,
+            ''element_count'', v_total,
+            ''error_count'', v_unexpected,
+            ''missing_count'', v_missing_count,
+            ''missing_percent'', v_missing_percent * 100,
+            ''message'', ''Unsupported casting from '' || COALESCE(v_actual_column_type, ''UNKNOWN'') || '' to '' || COALESCE(v_type_expected, ''UNKNOWN'')
+        );
+        v_value_counts := NULL;
+        v_log_message := ''Unsupported conversion - column profile populated with error details'';
+    ELSE
+        v_column_profile := NULL;
+        v_value_counts := NULL;
+        v_log_message := ''No error records - skipping metrics computation'';
+    END IF;
+    
     UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
 
     ----------------------------------------------------------------------------------------------------
@@ -377,8 +788,8 @@ BEGIN
         v_sql := ''INSERT INTO "'' || v_dq_db_name || ''"."'' || v_dq_schema_name || ''".DQ_RULE_RESULTS (
             BATCH_ID, DATASET_RUN_ID, DATASET_ID, RULE_CONFIG_ID, EXPECTATION_ID, RUN_NAME, RUN_TIMESTAMP, DATASET_NAME,
             EXPECATION_CONFIG, IS_SUCCESS, RESULTS, EXPECTATION_NAME, DETAILS, ELEMENT_COUNT,
-            UNEXPECTED_COUNT, UNEXPECTED_PERCENT, UNEXPECTED_PERCENT_NONMISSING, UNEXPECTED_PERCENT_TOTAL,
-             FAILED_ROWS, DIMENSION
+            MISSING_COUNT, MISSING_PERCENT, OBSERVED_VALUE, PARTIAL_UNEXPECTED_COUNTS, PARTIAL_UNEXPECTED_INDEX_LIST, PARTIAL_UNEXPECTED_LIST,
+            UNEXPECTED_COUNT, UNEXPECTED_PERCENT, UNEXPECTED_PERCENT_NONMISSING, UNEXPECTED_PERCENT_TOTAL, UNEXPECTED_ROWS, DATA_ROWS, DIMENSION, FAILED_ROWS
             )
             SELECT
             '' || COALESCE(v_batch_id::STRING, ''null'') || '', '' ||
@@ -390,9 +801,14 @@ BEGIN
             PARSE_JSON('''''' || v_results_json_for_sql || ''''''), '''''' || REPLACE(COALESCE(v_expectation_name, ''null''), '''''''', '''''''''''') || '''''', 
             PARSE_JSON('''''' || v_details_json_for_sql || ''''''), '' ||
             COALESCE(v_total::STRING, ''null'') || '', '' ||
+            COALESCE(v_missing_count::STRING, ''null'') || '', '' ||
+            COALESCE(v_missing_percent*100::STRING, ''null'') || '', '' ||
+            ''NULL::VARIANT, '' ||
+            ''PARSE_JSON(\\'''' || REPLACE(COALESCE(v_value_counts::STRING, ''null''), ''\\'''', '''''''''''') || ''\\''), NULL::VARIANT, NULL::VARIANT, '' ||
             COALESCE(v_unexpected::STRING, ''null'') || '', '' ||
-            COALESCE(v_percent*100::STRING, ''null'') || '', NULL::FLOAT, '' || COALESCE(v_percent*100::STRING, ''null'') || '', '' ||
-            ''NULL::VARIANT, '''''' || COALESCE(RULE:DIMENSION, ''null'') || '''''''';
+            COALESCE(v_percent*100::STRING, ''null'') || '', '' ||
+            COALESCE(v_unexpected_percent_nonmissing*100::STRING, ''null'') || '', '' ||
+            COALESCE(v_unexpected_percent_total*100::STRING, ''null'') || '', PARSE_JSON(\\'''' || REPLACE(COALESCE(v_column_profile::STRING, ''null''), ''\\'''', '''''''''''') || ''\\''), NULL::VARIANT, '''''' || COALESCE(RULE:DIMENSION, ''null'') || '''''', NULL::VARIANT'';
 
             EXECUTE IMMEDIATE v_sql;
         EXCEPTION

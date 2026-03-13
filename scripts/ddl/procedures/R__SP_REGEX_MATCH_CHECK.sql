@@ -58,6 +58,12 @@ DECLARE
     v_from_clause STRING;
     v_clean_dataset_name STRING;
     v_full_target_table_name STRING;
+
+    -- Column profile metrics for error records
+    v_column_profile VARIANT;
+    v_value_counts VARIANT;
+    v_col_unique_count NUMBER;
+    v_col_unique_percent FLOAT;
     
     -- Incremental Load Variables
     v_is_incremental BOOLEAN;
@@ -204,12 +210,12 @@ BEGIN
         v_from_clause := ''"'' || v_database_name || ''"."'' || v_schema_name || ''"."'' || v_table_name || ''"'';
     END IF;
 
-    -- Pattern mismatch condition: value is not null and does not match regex
-    v_where_clause_condition := ''"'' || v_column_nm || ''" IS NOT NULL AND NOT REGEXP_LIKE(CAST("'' || v_column_nm || ''" AS VARCHAR), '''''' || v_regex_pattern || '''''')'';
+    -- Pattern mismatch condition: value is null/blank or does not match regex (TRIM before checking)
+    v_where_clause_condition := ''"'' || v_column_nm || ''" IS NULL OR TRIM(CAST("'' || v_column_nm || ''" AS VARCHAR)) = '''''''' OR NOT REGEXP_LIKE(TRIM(CAST("'' || v_column_nm || ''" AS VARCHAR)), '''''' || v_regex_pattern || '''''')'';
 
     v_sql := ''SELECT
                  COUNT(*) AS total_count,
-                 COUNT_IF("'' || v_column_nm || ''" IS NULL) AS missing_count,
+                 COUNT_IF("'' || v_column_nm || ''" IS NULL OR TRIM(CAST("'' || v_column_nm || ''" AS VARCHAR)) = '''''''') AS missing_count,
                  COUNT_IF('' || v_where_clause_condition || '') AS unexpected_count
               FROM '' || v_from_clause || '' WHERE 1=1 '' || v_incremental_filter;
 
@@ -303,7 +309,7 @@ BEGIN
             v_full_target_table_name := ''"'' || v_dq_db_name || ''"."'' || v_dq_schema_name || ''"."'' || v_failed_records_table || ''"'';
 
             v_sql := ''CREATE TABLE IF NOT EXISTS '' || v_full_target_table_name || '' AS '' ||
-                     ''SELECT '' || v_run_id || ''::NUMBER AS DATASET_RUN_ID, '' || v_data_asset_id || ''::NUMBER AS DATASET_ID, '' || v_check_config_id || ''::NUMBER AS RULE_CONFIG_ID, '' ||
+                     ''SELECT '' || v_run_id || ''::NUMBER(38,0) AS DATASET_RUN_ID, '' || v_data_asset_id || ''::NUMBER(38,0) AS DATASET_ID, '' || v_check_config_id || ''::NUMBER(38,0) AS RULE_CONFIG_ID, '' ||
                      ''CURRENT_TIMESTAMP()::TIMESTAMP_LTZ AS DQ_LOAD_TIMESTAMP, * FROM '' || v_from_clause || '' WHERE 1=0'';
             EXECUTE IMMEDIATE v_sql;
 
@@ -329,6 +335,71 @@ BEGIN
     UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
 
     ----------------------------------------------------------------------------------------------------
+    -- 6b. Compute column profile metrics and value counts for error records
+    v_step := ''COMPUTE_ERROR_METRICS'';
+    INSERT INTO DQ_RULE_AUDIT_LOG (DATASET_RUN_ID, RULE_CONFIG_ID, PROCEDURE_NAME, STEP_NAME, START_TIMESTAMP, STATUS, LOG_MESSAGE)
+    VALUES (:v_run_id, :v_check_config_id, :v_procedure_name, :v_step, CURRENT_TIMESTAMP(), ''STARTED'', ''Computing column profile metrics for error records'');
+    
+    IF (v_unexpected > 0) THEN
+        BEGIN
+            -- Compute column profile metrics from failed records (without min/max)
+            v_sql := ''SELECT 
+                        COUNT(DISTINCT "'' || v_column_nm || ''") AS unique_cnt,
+                        CASE WHEN COUNT(*) > 0 THEN (COUNT(DISTINCT "'' || v_column_nm || ''")::FLOAT / COUNT(*)) * 100 ELSE 0 END AS unique_pct
+                      FROM '' || v_from_clause || '' WHERE '' || v_where_clause_condition || v_incremental_filter;
+            
+            v_result := (EXECUTE IMMEDIATE v_sql);
+            LET v_profile_cursor CURSOR FOR v_result;
+            FOR profile_rec IN v_profile_cursor DO
+                v_col_unique_count := profile_rec.unique_cnt;
+                v_col_unique_percent := profile_rec.unique_pct;
+                BREAK;
+            END FOR;
+            
+            -- Build column profile VARIANT (without min/max values)
+            v_column_profile := OBJECT_CONSTRUCT(
+                ''column_name'', v_column_nm,
+                ''error_total_count'', v_unexpected,
+                ''error_unique_percent'', v_col_unique_percent,
+                ''error_unique_count'', v_col_unique_count,
+                ''missing_percentage'', v_missing_percent * 100,
+                ''missing_count'', v_missing_count
+            );
+            
+            -- Compute value counts (frequency of each distinct value excluding nulls and blanks)
+            v_sql := ''SELECT OBJECT_AGG(val, cnt) AS value_counts FROM (
+                        SELECT TRIM("'' || v_column_nm || ''"::STRING) AS val, COUNT(*) AS cnt 
+                        FROM '' || v_from_clause || '' 
+                        WHERE ('' || v_where_clause_condition || '') AND "'' || v_column_nm || ''" IS NOT NULL AND TRIM("'' || v_column_nm || ''"::STRING) <> '''''''' '' || v_incremental_filter || ''
+                        GROUP BY TRIM("'' || v_column_nm || ''"::STRING)
+                        ORDER BY cnt DESC
+                        LIMIT 1000
+                      )'';
+            
+            v_result := (EXECUTE IMMEDIATE v_sql);
+            LET v_vc_cursor CURSOR FOR v_result;
+            FOR vc_rec IN v_vc_cursor DO
+                v_value_counts := OBJECT_CONSTRUCT(''value_counts_without_nan'', vc_rec.value_counts);
+                BREAK;
+            END FOR;
+            
+            v_log_message := ''Column profile and value counts computed for error records'';
+        EXCEPTION
+            WHEN OTHER THEN
+                v_error_message := ''Error computing error metrics: '' || SQLERRM;
+                v_column_profile := NULL;
+                v_value_counts := NULL;
+                v_log_message := ''Warning: Could not compute error metrics - '' || SQLERRM;
+        END;
+    ELSE
+        v_column_profile := NULL;
+        v_value_counts := NULL;
+        v_log_message := ''No error records - skipping metrics computation'';
+    END IF;
+    
+    UPDATE DQ_RULE_AUDIT_LOG SET END_TIMESTAMP = CURRENT_TIMESTAMP(), STATUS = ''COMPLETED'', LOG_MESSAGE = :v_log_message WHERE DATASET_RUN_ID = :v_run_id AND RULE_CONFIG_ID = :v_check_config_id AND STEP_NAME = :v_step;
+
+    ----------------------------------------------------------------------------------------------------
     -- 7. Insert Results into DQ_RULE_RESULTS Table
     v_step := ''INSERT_DQ_RESULTS_TABLE'';
     INSERT INTO DQ_RULE_AUDIT_LOG (DATASET_RUN_ID, RULE_CONFIG_ID, PROCEDURE_NAME, STEP_NAME, START_TIMESTAMP, STATUS, LOG_MESSAGE)
@@ -347,7 +418,8 @@ BEGIN
         v_sql := ''INSERT INTO "'' || v_dq_db_name || ''"."'' || v_dq_schema_name || ''".DQ_RULE_RESULTS (
                 BATCH_ID, DATASET_RUN_ID, DATASET_ID, RULE_CONFIG_ID, EXPECTATION_ID, RUN_NAME, RUN_TIMESTAMP, DATASET_NAME,
                 EXPECATION_CONFIG, IS_SUCCESS, RESULTS, EXPECTATION_NAME, DETAILS, ELEMENT_COUNT,
-                UNEXPECTED_COUNT, UNEXPECTED_PERCENT, MISSING_COUNT, MISSING_PERCENT, UNEXPECTED_PERCENT_TOTAL
+                MISSING_COUNT, MISSING_PERCENT, OBSERVED_VALUE, PARTIAL_UNEXPECTED_COUNTS, PARTIAL_UNEXPECTED_INDEX_LIST, PARTIAL_UNEXPECTED_LIST,
+                UNEXPECTED_COUNT, UNEXPECTED_PERCENT, UNEXPECTED_PERCENT_NONMISSING, UNEXPECTED_PERCENT_TOTAL, UNEXPECTED_ROWS, DATA_ROWS, FAILED_ROWS, DIMENSION
                 ) SELECT '' ||
                 COALESCE(v_batch_id::STRING, ''null'') || '', '' || v_run_id || '', '' || v_data_asset_id || '', '' || v_check_config_id || '', '' || v_expectation_id || '', '''''' || 
                 REPLACE(COALESCE(v_run_name, ''null''), '''''''', '''''''''''') || '''''', CURRENT_TIMESTAMP(), '''''' || REPLACE(COALESCE(v_data_asset_name, ''null''), '''''''', '''''''''''') || '''''', 
@@ -355,7 +427,15 @@ BEGIN
                 CASE WHEN v_status_code = v_success_code THEN ''TRUE'' ELSE ''FALSE'' END || '', 
                 PARSE_JSON('''''' || REPLACE(results_json_str, '''''''', '''''''''''') || ''''''), '''''' || REPLACE(COALESCE(v_expectation_name, ''null''), '''''''', '''''''''''') || '''''', 
                 PARSE_JSON('''''' || REPLACE(details_json_str, '''''''', '''''''''''') || ''''''), '' ||
-                v_total || '', '' || v_unexpected || '', '' || (v_percent*100) || '', '' || v_missing_count || '', '' || (v_missing_percent*100) || '', '' || (v_unexpected_percent_total*100) || '''';
+                COALESCE(v_total::STRING, ''null'') || '', '' ||
+                COALESCE(v_missing_count::STRING, ''null'') || '', '' ||
+                COALESCE(v_missing_percent*100::STRING, ''null'') || '', '' ||
+                ''NULL::VARIANT, '' ||
+                ''PARSE_JSON(\\'''' || REPLACE(COALESCE(v_value_counts::STRING, ''null''), ''\\'''', '''''''''''') || ''\\''), NULL::VARIANT, NULL::VARIANT, '' ||
+                COALESCE(v_unexpected::STRING, ''null'') || '', '' ||
+                COALESCE(v_percent*100::STRING, ''null'') || '', '' ||
+                COALESCE(v_unexpected_percent_nonmissing*100::STRING, ''null'') || '', '' ||
+                COALESCE(v_unexpected_percent_total*100::STRING, ''null'') || '', PARSE_JSON(\\'''' || REPLACE(COALESCE(v_column_profile::STRING, ''null''), ''\\'''', '''''''''''') || ''\\''), NULL::VARIANT, NULL::VARIANT, NULL::VARIANT'';
 
         EXECUTE IMMEDIATE v_sql;
     EXCEPTION
