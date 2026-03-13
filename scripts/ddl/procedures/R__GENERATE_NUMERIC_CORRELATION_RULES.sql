@@ -15,7 +15,7 @@ LANGUAGE PYTHON
 RUNTIME_VERSION = '3.11'
 PACKAGES = ('pandas', 'numpy', 'snowflake-snowpark-python')
 HANDLER = 'generate_correlation_rules_handler'
-EXECUTE AS OWNER
+EXECUTE AS CALLER
 AS '
 import snowflake.snowpark as sp
 from snowflake.snowpark import Session
