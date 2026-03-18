@@ -370,7 +370,7 @@ BEGIN
         
         v_sql := ''INSERT INTO "'' || v_dq_db_name || ''"."'' || v_dq_schema_name || ''".DQ_RULE_RESULTS (
                 BATCH_ID, DATASET_RUN_ID, DATASET_ID, RULE_CONFIG_ID, EXPECTATION_ID, RUN_NAME, RUN_TIMESTAMP, DATASET_NAME,
-                EXPECATION_CONFIG, IS_SUCCESS, RESULTS, EXPECTATION_NAME, DETAILS, ELEMENT_COUNT,
+                EXPECTATION_CONFIG, IS_SUCCESS, RESULTS, EXPECTATION_NAME, DETAILS, ELEMENT_COUNT,
                 UNEXPECTED_COUNT, UNEXPECTED_PERCENT, MISSING_COUNT, MISSING_PERCENT, UNEXPECTED_PERCENT_TOTAL
                 ) SELECT '' ||
                 COALESCE(v_batch_id::STRING, ''null'') || '', '' || v_run_id || '', '' || v_data_asset_id || '', '' || v_check_config_id || '', '' || v_expectation_id || '', '''''' || 
