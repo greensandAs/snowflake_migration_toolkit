@@ -110,54 +110,54 @@ def main():
              print(f"   ⚠️ Error extracting views: {e}")
 
         # 4. PROCEDURES
-        # print("\n⚙️ Extracting Procedures...")
-        # try:
-        #     cur.execute(f"SELECT PROCEDURE_NAME FROM INFORMATION_SCHEMA.PROCEDURES WHERE PROCEDURE_OWNER = '{SOURCE_CONFIG['owner_role']}'")
-        #     owned_procs = {r[0] for r in cur.fetchall()}
+        print("\n⚙️ Extracting Procedures...")
+        try:
+            cur.execute(f"SELECT PROCEDURE_NAME FROM INFORMATION_SCHEMA.PROCEDURES WHERE PROCEDURE_OWNER = '{SOURCE_CONFIG['owner_role']}'")
+            owned_procs = {r[0] for r in cur.fetchall()}
             
-        #     cur.execute(f"SHOW PROCEDURES")
-        #     query_id = cur.sfqid
-        #     cur.execute(f"""SELECT "arguments", "name" FROM TABLE(RESULT_SCAN('{query_id}')) WHERE "is_builtin" = 'N' AND "name" NOT LIKE 'SYSTEM$%'""")
+            cur.execute(f"SHOW PROCEDURES")
+            query_id = cur.sfqid
+            cur.execute(f"""SELECT "arguments", "name" FROM TABLE(RESULT_SCAN('{query_id}')) WHERE "is_builtin" = 'N' AND "name" NOT LIKE 'SYSTEM$%'""")
             
-        #     for row in cur.fetchall():
-        #         raw_sig, name = row
-        #         clean_name = name.split('(')[0].strip()
-        #         if clean_name in owned_procs:
-        #             sig = clean_signature(raw_sig)
-        #             try:
-        #                 cur.execute(f"SELECT GET_DDL('PROCEDURE', '{sig}')")
-        #                 ddl = clean_ddl(cur.fetchone()[0])
-        #                 content = "USE DATABASE {{ snowflake_database }};\n\nUSE SCHEMA {{ snowflake_schema }};\n\n" + ddl
-        #                 save_file(FOLDERS["PROC"], f"R__{clean_name}.sql", content)
-        #             except Exception as e:
-        #                 print(f"   ⚠️ Failed to get DDL for Proc {name}: {e}")
-        # except Exception as e:
-        #      print(f"   ⚠️ Error extracting procedures: {e}")
+            for row in cur.fetchall():
+                raw_sig, name = row
+                clean_name = name.split('(')[0].strip()
+                if clean_name in owned_procs:
+                    sig = clean_signature(raw_sig)
+                    try:
+                        cur.execute(f"SELECT GET_DDL('PROCEDURE', '{sig}')")
+                        ddl = clean_ddl(cur.fetchone()[0])
+                        content = "USE DATABASE {{ snowflake_database }};\n\nUSE SCHEMA {{ snowflake_schema }};\n\n" + ddl
+                        save_file(FOLDERS["PROC"], f"R__{clean_name}.sql", content)
+                    except Exception as e:
+                        print(f"   ⚠️ Failed to get DDL for Proc {name}: {e}")
+        except Exception as e:
+             print(f"   ⚠️ Error extracting procedures: {e}")
 
-        # # 5. FUNCTIONS
-        # print("\n⚡ Extracting Functions...")
-        # try:
-        #     cur.execute(f"SELECT FUNCTION_NAME FROM INFORMATION_SCHEMA.FUNCTIONS WHERE FUNCTION_OWNER = '{SOURCE_CONFIG['owner_role']}'")
-        #     owned_funcs = {r[0] for r in cur.fetchall()}
+        # 5. FUNCTIONS
+        print("\n⚡ Extracting Functions...")
+        try:
+            cur.execute(f"SELECT FUNCTION_NAME FROM INFORMATION_SCHEMA.FUNCTIONS WHERE FUNCTION_OWNER = '{SOURCE_CONFIG['owner_role']}'")
+            owned_funcs = {r[0] for r in cur.fetchall()}
             
-        #     cur.execute(f"SHOW FUNCTIONS")
-        #     query_id = cur.sfqid
-        #     cur.execute(f"""SELECT "arguments", "name" FROM TABLE(RESULT_SCAN('{query_id}')) WHERE "is_builtin" = 'N' AND "name" NOT LIKE 'SYSTEM$%'""")
+            cur.execute(f"SHOW FUNCTIONS")
+            query_id = cur.sfqid
+            cur.execute(f"""SELECT "arguments", "name" FROM TABLE(RESULT_SCAN('{query_id}')) WHERE "is_builtin" = 'N' AND "name" NOT LIKE 'SYSTEM$%'""")
             
-        #     for row in cur.fetchall():
-        #         raw_sig, name = row
-        #         clean_name = name.split('(')[0].strip()
-        #         if clean_name in owned_funcs:
-        #             sig = clean_signature(raw_sig)
-        #             try:
-        #                 cur.execute(f"SELECT GET_DDL('FUNCTION', '{sig}')")
-        #                 ddl = clean_ddl(cur.fetchone()[0])
-        #                 content = "USE DATABASE {{ snowflake_database }};\n\nUSE SCHEMA {{ snowflake_schema }};\n\n" + ddl
-        #                 save_file(FOLDERS["FUNC"], f"R__{clean_name}.sql", content)
-        #             except Exception as e:
-        #                 print(f"   ⚠️ Failed to get DDL for Func {name}: {e}")
-        # except Exception as e:
-        #      print(f"   ⚠️ Error extracting functions: {e}")
+            for row in cur.fetchall():
+                raw_sig, name = row
+                clean_name = name.split('(')[0].strip()
+                if clean_name in owned_funcs:
+                    sig = clean_signature(raw_sig)
+                    try:
+                        cur.execute(f"SELECT GET_DDL('FUNCTION', '{sig}')")
+                        ddl = clean_ddl(cur.fetchone()[0])
+                        content = "USE DATABASE {{ snowflake_database }};\n\nUSE SCHEMA {{ snowflake_schema }};\n\n" + ddl
+                        save_file(FOLDERS["FUNC"], f"R__{clean_name}.sql", content)
+                    except Exception as e:
+                        print(f"   ⚠️ Failed to get DDL for Func {name}: {e}")
+        except Exception as e:
+             print(f"   ⚠️ Error extracting functions: {e}")
 
     finally:
         conn.close()
