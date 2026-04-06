@@ -1,14 +1,8 @@
--- Set the context (Ensure the session is pointed to the correct  location)
-
 USE DATABASE {{ snowflake_database }};
+
 USE SCHEMA {{ snowflake_schema }};
 
-
-CREATE OR REPLACE PROCEDURE VALIDATE_EQUATIONS_ON_DATA(
-    p_table_name VARCHAR,
-    p_equations VARCHAR,
-    p_tolerance FLOAT
-)
+CREATE OR REPLACE PROCEDURE "VALIDATE_EQUATIONS_ON_DATA"("P_TABLE_NAME" VARCHAR, "P_EQUATIONS" VARCHAR, "P_TOLERANCE" FLOAT)
 RETURNS VARCHAR
 LANGUAGE PYTHON
 RUNTIME_VERSION = '3.11'
@@ -136,7 +130,7 @@ def validate_equations_handler(session: Session, p_table_name: str, p_equations:
                 for orig_col, safe_name in col_mapping.items():
                     # Use word boundaries to avoid partial replacements
                     expr_sanitized = re.sub(
-                        r"\b" + re.escape(orig_col) + r"\b",
+                        r"" + re.escape(orig_col) + r"",
                         safe_name,
                         expr_sanitized
                     )

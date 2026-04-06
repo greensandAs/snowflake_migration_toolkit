@@ -220,28 +220,38 @@ def main(session: snowpark.Session, P_DATASET_ID, P_PARALLEL_JOBS):
 
         if rule_configs:
             if P_PARALLEL_JOBS is None or P_PARALLEL_JOBS <= 0:
-                parallel_jobs = len(rule_configs)
+                parallel_jobs = min(len(rule_configs), 10)
             else:
                 parallel_jobs = P_PARALLEL_JOBS
                 
             parallel_jobs = min(parallel_jobs, 30)
             
-            results_from_parallel_execution = joblib.Parallel(n_jobs=parallel_jobs)(joblib.delayed(parallel_worker)(session, rc, config) for rc in rule_configs)
+            try:
+                results_from_parallel_execution = joblib.Parallel(n_jobs=parallel_jobs, prefer="threads")(joblib.delayed(parallel_worker)(session, rc, config) for rc in rule_configs)
+            except Exception as e:
+                master_audit_logs.append((run_id, "EXECUTE_DQ_RULES_MASTER", "PARALLEL_EXECUTION", f"Parallel execution failed: {str(e)}", step_start_time, datetime.datetime.now(), "FAILED", f"Parallel execution failed: {str(e)}"))
+                error_count = len(rule_configs)
+                total_rules = len(rule_configs)
+                results_from_parallel_execution = []
 
             failed_rule_ids = []
             
-            for result in results_from_parallel_execution:
-                total_rules += 1
-                if result["status"] == "SUCCESS":
-                    success_count += 1
-                elif result["status"] == "FAILURE":
-                    failure_count += 1
-                    if "audit_log" in result and "rule_config_id" in result["audit_log"]:
-                        failed_rule_ids.append(result["audit_log"]["rule_config_id"])
-                else: 
-                    error_count += 1
-                    if "audit_log" in result and "rule_config_id" in result["audit_log"]:
-                        error_rule_ids.append(result["audit_log"]["rule_config_id"])
+            try:
+                for result in results_from_parallel_execution:
+                    total_rules += 1
+                    if result["status"] == "SUCCESS":
+                        success_count += 1
+                    elif result["status"] == "FAILURE":
+                        failure_count += 1
+                        if "audit_log" in result and "rule_config_id" in result["audit_log"]:
+                            failed_rule_ids.append(result["audit_log"]["rule_config_id"])
+                    else: 
+                        error_count += 1
+                        if "audit_log" in result and "rule_config_id" in result["audit_log"]:
+                            error_rule_ids.append(result["audit_log"]["rule_config_id"])
+            except Exception as e:
+                master_audit_logs.append((run_id, "EXECUTE_DQ_RULES_MASTER", "RESULT_AGGREGATION", f"Error aggregating results: {str(e)}", step_start_time, datetime.datetime.now(), "FAILED", f"Error aggregating results: {str(e)}"))
+                error_count += 1
         
         step_end_time = datetime.datetime.now()
         
@@ -271,6 +281,9 @@ def main(session: snowpark.Session, P_DATASET_ID, P_PARALLEL_JOBS):
     # DATASET-LEVEL CONSOLIDATED FILE GENERATION 
     # =========================================================================
     file_generation_error = False
+    final_file_name = ''NULL''
+    source_sql_text = None
+    failure_view_name = None
     if failure_count > 0:
         step_start_time = datetime.datetime.now()
         try:
@@ -340,25 +353,21 @@ def main(session: snowpark.Session, P_DATASET_ID, P_PARALLEL_JOBS):
             pivot_sql_fragment = ", ".join(dynamic_cols)
 
             # 4. Final COPY INTO (Metadata Added at the End)
-            copy_sql = f"""
-                COPY INTO {DQ_STAGE_NAME}/{export_file_path}
-                FROM (
-                    SELECT 
-                        -- C. Run Metadata (At the End)
+            source_select_sql = f"""SELECT 
                         {run_id} AS DATASET_RUN_ID,
                         {P_DATASET_ID} AS DATASET_ID,
                         ''{data_asset[''DATASET_NAME'']}'' AS DATASET_NAME,
                         CURRENT_TIMESTAMP() AS EXPORT_TIMESTAMP,
-                        
-                        -- B. Rule Audit Flags (Aggregates)
                         {pivot_sql_fragment},
-                        
-                        -- A. Original Data (Grouping Keys)
                         f.* EXCLUDE (RULE_CONFIG_ID, DATASET_RUN_ID, DATASET_ID, DQ_LOAD_TIMESTAMP)
-                          
                     FROM {failure_table_name} f
                     WHERE f.DATASET_RUN_ID = {run_id}
-                    GROUP BY ALL
+                    GROUP BY ALL"""
+
+            copy_sql = f"""
+                COPY INTO {DQ_STAGE_NAME}/{export_file_path}
+                FROM (
+                    {source_select_sql}
                 )
                 FILE_FORMAT = (TYPE = CSV compression=''gzip'' FIELD_OPTIONALLY_ENCLOSED_BY = ''"'' BINARY_FORMAT = ''UTF8'')
                 HEADER = TRUE
@@ -367,6 +376,91 @@ def main(session: snowpark.Session, P_DATASET_ID, P_PARALLEL_JOBS):
                 MAX_FILE_SIZE = 5368709120
             """
             session.sql(copy_sql).collect()
+            source_sql_text = source_select_sql
+
+            all_rules_metadata = session.sql(f"""
+                SELECT DISTINCT
+                    cc.RULE_CONFIG_ID,
+                    cc.EXPECTATION_ID,
+                    cc.KWARGS,
+                    COALESCE(UPPER(REPLACE(cc.COLUMN_NAME, '' '', ''_'')), ''TABLE'') as COL_NAME,
+                    COALESCE(em.CHECK_TYPE, ''UNCATEGORIZED'') as CATEGORY,
+                    COALESCE(em.DIMENSION, ''UNCATEGORIZED'') as DIMENSION,
+                    COALESCE(em.CHECK_LEVEL, ''ROW'') as CHECK_LEVEL
+                FROM {FRAMEWORK_PATH}.DQ_RULE_RESULTS r
+                JOIN {rules_config_table} cc ON r.RULE_CONFIG_ID = cc.RULE_CONFIG_ID
+                JOIN {exp_master_table} em ON cc.EXPECTATION_ID = em.EXPECTATION_ID
+                WHERE r.DATASET_ID = {P_DATASET_ID}
+                  AND r.DATASET_RUN_ID IN (
+                    SELECT DATASET_RUN_ID FROM (
+                      SELECT DATASET_RUN_ID FROM {FRAMEWORK_PATH}.DQ_DATASET_RUN_LOG
+                      WHERE DATASET_ID = {P_DATASET_ID}
+                      ORDER BY DATASET_RUN_ID DESC LIMIT 90
+                    )
+                    UNION
+                    SELECT {run_id}
+                  )
+            """).collect()
+
+            if not all_rules_metadata:
+                master_audit_logs.append((run_id, "EXECUTE_DQ_RULES_MASTER", "VIEW_CREATION", "No rule metadata found for view generation. Skipping.", step_start_time, datetime.datetime.now(), "SKIPPED", None))
+            else:
+                view_dynamic_cols = []
+                for r in all_rules_metadata:
+                    category = r[''CATEGORY'']
+                    rule_id = r[''RULE_CONFIG_ID'']
+                    col_name = r[''COL_NAME'']
+                    dimension = r[''DIMENSION'']
+                    kwargs_json = r[''KWARGS'']
+                    exp_id = r[''EXPECTATION_ID'']
+                    if kwargs_json:
+                        try:
+                            args = json.loads(kwargs_json)
+                            if exp_id == 10:
+                                rmin = args.get(''min_value'', ''MIN'')
+                                rmax = args.get(''max_value'', ''MAX'')
+                                category = f"RANGE_CHECK({rmin}_{rmax})"
+                            elif exp_id == 7:
+                                dtype = args.get(''datatype'', ''UNKNOWN'')
+                                category = f"DATATYPE_CHECK({dtype})"
+                            elif exp_id == 18:
+                                lmin = args.get(''min_value'', ''MIN'')
+                                lmax = args.get(''max_value'', ''MAX'')
+                                category = f"{category}({lmin}_{lmax})"
+                        except:
+                            pass
+                    header = f''"{col_name}_{dimension}_{category}_{rule_id}"''
+                    check_level = r[''CHECK_LEVEL'']
+                    if check_level != ''ROW'':
+                        fail_label = f"FAIL - {check_level} CHECK"
+                        view_col_sql = f"CASE WHEN MAX(IFF(rr.RULE_CONFIG_ID = {rule_id}, rr.IS_SUCCESS, NULL)) IS NULL THEN ''NOT CONFIGURED'' WHEN MAX(IFF(rr.RULE_CONFIG_ID = {rule_id}, rr.IS_SUCCESS, NULL)) = FALSE THEN ''{fail_label}'' ELSE ''PASS'' END AS {header}"
+                    else:
+                        view_col_sql = f"CASE WHEN COUNT(IFF(f.RULE_CONFIG_ID = {rule_id}, 1, NULL)) = 0 AND MAX(IFF(rr.RULE_CONFIG_ID = {rule_id}, rr.IS_SUCCESS, NULL)) IS NULL THEN ''NOT CONFIGURED'' WHEN COUNT(IFF(f.RULE_CONFIG_ID = {rule_id}, 1, NULL)) = 0 AND MAX(IFF(rr.RULE_CONFIG_ID = {rule_id}, rr.IS_SUCCESS, NULL)) IS NOT NULL THEN ''PASS'' WHEN MAX(IFF(f.RULE_CONFIG_ID = {rule_id}, 1, 0)) = 1 THEN ''FAIL'' ELSE ''PASS'' END AS {header}"
+                    view_dynamic_cols.append(view_col_sql)
+                view_pivot_sql_fragment = ", ".join(view_dynamic_cols)
+
+                rule_ids = [r[''RULE_CONFIG_ID''] for r in all_rules_metadata]
+                rule_ids_csv = ", ".join(map(str, rule_ids))
+
+                view_name = f"{q_ident(config[''DQ_DB_NAME''])}.{q_ident(config[''DQ_SCHEMA_NAME''])}.VW_{clean_dataset_name}_DQ_FAILURE"
+                view_select_sql = f"""SELECT 
+                            f.DATASET_RUN_ID,
+                            {P_DATASET_ID} AS DATASET_ID,
+                            ''{data_asset[''DATASET_NAME'']}'' AS DATASET_NAME,
+                            {view_pivot_sql_fragment},
+                            f.* EXCLUDE (RULE_CONFIG_ID, DATASET_RUN_ID, DATASET_ID, DQ_LOAD_TIMESTAMP)
+                        FROM {failure_table_name} f
+                        LEFT JOIN {FRAMEWORK_PATH}.DQ_RULE_RESULTS rr
+                            ON f.DATASET_RUN_ID = rr.DATASET_RUN_ID
+                            AND rr.RULE_CONFIG_ID IN ({rule_ids_csv})
+                        GROUP BY ALL"""
+                create_view_sql = f"""
+                    CREATE OR REPLACE VIEW {view_name} AS
+                    {view_select_sql}
+                """
+                session.sql(create_view_sql).collect()
+                failure_view_name = view_name.replace(''"'', '''')
+                master_audit_logs.append((run_id, "EXECUTE_DQ_RULES_MASTER", "VIEW_CREATION", f"Created pivot view {view_name}", step_start_time, datetime.datetime.now(), "COMPLETED", None))
 
         except Exception as e:
             file_generation_error = True
@@ -384,16 +478,26 @@ def main(session: snowpark.Session, P_DATASET_ID, P_PARALLEL_JOBS):
         
     success_percent = (success_count * 100.0) / total_rules if total_rules > 0 else 0
     
-    log_and_return(session, config, master_audit_logs, 0)
+    try:
+        log_and_return(session, config, master_audit_logs, 0)
+    except Exception as e:
+        pass
     
-    run_log_table_path = f"{config[''DQ_DB_NAME'']}.{config[''DQ_SCHEMA_NAME'']}.DQ_DATASET_RUN_LOG"
-    
-    final_insert_sql = f"""
-        INSERT INTO {run_log_table_path} 
-        (DATASET_RUN_ID, DATASET_ID, RUN_TIME, EVALUATED_EXPECTATIONS, SUCCESSFULL_EXPECTATIONS, UNSUCCESSFULL_EXPECTATIONS, RUN_STATUS, CREATED_BY, SUCCESS_PERCENT, CREATED_TIMESTAMP, FAILURE_FILE) 
-        VALUES ({run_id}, {P_DATASET_ID}, {run_time_seconds}, {total_rules}, {success_count}, {failure_count}, ''{final_status}'', ''{session.get_current_user()}'', {success_percent}, ''{master_start_time}'',{final_file_name})
-    """
-    session.sql(final_insert_sql).collect()
+    try:
+        run_log_table_path = f"{config[''DQ_DB_NAME'']}.{config[''DQ_SCHEMA_NAME'']}.DQ_DATASET_RUN_LOG"
+        
+        final_insert_sql = f"""
+            INSERT INTO {run_log_table_path} 
+            (DATASET_RUN_ID, DATASET_ID, RUN_TIME, EVALUATED_EXPECTATIONS, SUCCESSFULL_EXPECTATIONS, UNSUCCESSFULL_EXPECTATIONS, ERROR_EXPECTATIONS, RUN_STATUS, CREATED_BY, SUCCESS_PERCENT, CREATED_TIMESTAMP, FAILURE_FILE, SOURCE_SQL, FAILURE_VIEW) 
+            VALUES ({run_id}, {P_DATASET_ID}, {run_time_seconds}, {total_rules}, {success_count}, {failure_count}, {error_count}, ''{final_status}'', ''{session.get_current_user()}'', {success_percent}, ''{master_start_time}'',{final_file_name},{format_for_sql(source_sql_text, is_string=True)},{format_for_sql(failure_view_name, is_string=True)})
+        """
+        session.sql(final_insert_sql).collect()
+    except Exception as e:
+        master_audit_logs.append((run_id, "EXECUTE_DQ_RULES_MASTER", "RUN_LOG_INSERT", f"Failed to insert run log: {str(e)}", datetime.datetime.now(), datetime.datetime.now(), "FAILED", f"Failed to insert run log: {str(e)}"))
+        try:
+            log_and_return(session, config, master_audit_logs, 0)
+        except:
+            pass
 
     # Final Return Code Logic
     if error_count > 0 or file_generation_error: 

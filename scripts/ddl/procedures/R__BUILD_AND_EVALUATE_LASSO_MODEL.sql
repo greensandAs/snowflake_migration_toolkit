@@ -1,17 +1,16 @@
--- Set the context (Ensure the session is pointed to the correct location)
 USE DATABASE {{ snowflake_database }};
+
 USE SCHEMA {{ snowflake_schema }};
--- Extracted on: 2025-10-27 10:24:55.
---------------------------------------------------------------------------------
-CREATE OR REPLACE PROCEDURE BUILD_AND_EVALUATE_LASSO_MODEL(
-    p_table_name VARCHAR,
-    p_features ARRAY,
-    p_target VARCHAR,
-    p_relations ARRAY,
-    p_data_config VARCHAR,
-    p_computed_var VARCHAR,
-    p_code VARCHAR,
-    p_rel VARCHAR
+
+CREATE OR REPLACE PROCEDURE "BUILD_AND_EVALUATE_LASSO_MODEL"(
+    "P_TABLE_NAME" VARCHAR,
+    "P_FEATURES" ARRAY,
+    "P_TARGET" VARCHAR,
+    "P_RELATIONS" ARRAY,
+    "P_DATA_CONFIG" VARCHAR,
+    "P_COMPUTED_VAR" VARCHAR,
+    "P_CODE" VARCHAR,
+    "P_REL" VARCHAR
 )
 RETURNS VARCHAR
 LANGUAGE PYTHON

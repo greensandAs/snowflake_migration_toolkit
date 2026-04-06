@@ -1,15 +1,8 @@
--- Set the context (Ensure the session is pointed to the correct location)
 USE DATABASE {{ snowflake_database }};
+
 USE SCHEMA {{ snowflake_schema }};
 
--- DDL for PROCEDURE: DQ_FRAMEWORK.METADATA.GENERATE_NUMERIC_CORRELATION_RULES(VARCHAR, ARRAY, FLOAT)
--- Extracted on: 2025-10-27 10:25:01
---------------------------------------------------------------------------------
-CREATE OR REPLACE PROCEDURE GENERATE_NUMERIC_CORRELATION_RULES(
-    p_table_name VARCHAR,
-    p_columns ARRAY,
-    p_threshold FLOAT
-)
+CREATE OR REPLACE PROCEDURE "GENERATE_NUMERIC_CORRELATION_RULES"("P_TABLE_NAME" VARCHAR, "P_COLUMNS" ARRAY, "P_THRESHOLD" FLOAT)
 RETURNS VARCHAR
 LANGUAGE PYTHON
 RUNTIME_VERSION = '3.11'
