@@ -447,6 +447,7 @@ def main(session: snowpark.Session, P_DATASET_ID, P_PARALLEL_JOBS):
                             f.DATASET_RUN_ID,
                             {P_DATASET_ID} AS DATASET_ID,
                             ''{data_asset[''DATASET_NAME'']}'' AS DATASET_NAME,
+                            MAX(rr.RUN_TIMESTAMP) AS DQ_TIMESTAMP,
                             {view_pivot_sql_fragment},
                             f.* EXCLUDE (RULE_CONFIG_ID, DATASET_RUN_ID, DATASET_ID, DQ_LOAD_TIMESTAMP)
                         FROM {failure_table_name} f
