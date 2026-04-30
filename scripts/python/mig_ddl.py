@@ -100,7 +100,7 @@ def main():
         try:
             cur.execute(f"SHOW VIEWS")
             # views = [r[1] for r in cur.fetchall() if r[5] == SOURCE_CONFIG['owner_role']]
-            views = [r[1] for r in cur.fetchall() if and not r[1].endswith('DQ_FAILURE')]
+            views = [r[1] for r in cur.fetchall() if not r[1].endswith('DQ_FAILURE')]
             for v in views:
                 cur.execute(f"SELECT GET_DDL('VIEW', '\"{v}\"')")
                 ddl = clean_ddl(cur.fetchone()[0])
