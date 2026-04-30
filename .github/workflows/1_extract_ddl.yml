@@ -34,13 +34,13 @@ jobs:
           SOURCE_PASSWORD: ${{ secrets.SOURCE_PASSWORD }}
           
           # --- Variables (For Config) ---
-          SOURCE_ACCOUNT: ${{ vars.SOURCE_ACCOUNT }}
-          SOURCE_USER: ${{ vars.SOURCE_USER }}
-          SOURCE_ROLE: ${{ vars.SOURCE_ROLE }}
-          SOURCE_WAREHOUSE: ${{ vars.SOURCE_WAREHOUSE }}
-          SOURCE_DATABASE: ${{ vars.SOURCE_DATABASE }}
-          SOURCE_SCHEMA: ${{ vars.SOURCE_SCHEMA }}
-          SOURCE_OWNER_ROLE: ${{ vars.SOURCE_OWNER_ROLE }}
+          SOURCE_ACCOUNT: ${{ vars.SOURCE_ACCOUNT_1 }}
+          SOURCE_USER: ${{ vars.SOURCE_USER_1 }}
+          SOURCE_ROLE: ${{ vars.SOURCE_ROLE_1 }}
+          SOURCE_WAREHOUSE: ${{ vars.SOURCE_WAREHOUSE_1 }}
+          SOURCE_DATABASE: ${{ vars.SOURCE_DATABASE_1 }}
+          SOURCE_SCHEMA: ${{ vars.SOURCE_SCHEMA_1 }}
+          SOURCE_OWNER_ROLE: ${{ vars.SOURCE_OWNER_ROLE_1 }}
         run: python scripts/python/mig_ddl.py
 
       
