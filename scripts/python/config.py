@@ -5,15 +5,16 @@ import os
 # ==========================================
 # Reads from GitHub Variables: SOURCE_ACCOUNT, SOURCE_USER, etc.
 # Reads from GitHub Secrets:   SOURCE_PASSWORD
+
 SOURCE_CONFIG = {
-    "user": os.getenv("SOURCE_USER_1"),
+    "user": os.getenv("SOURCE_USER"),
     "password": os.getenv("SOURCE_PASSWORD"),
-    "account": os.getenv("SOURCE_ACCOUNT_1"),
-    "warehouse": os.getenv("SOURCE_WAREHOUSE_1"),
-    "database": os.getenv("SOURCE_DATABASE_1"),
-    "schema": os.getenv("SOURCE_SCHEMA_1"),
-    "role": os.getenv("SOURCE_ROLE_1"),
-    "owner_role": os.getenv("SOURCE_OWNER_ROLE_1") 
+    "account": os.getenv("SOURCE_ACCOUNT"),
+    "warehouse": os.getenv("SOURCE_WAREHOUSE"),
+    "database": os.getenv("SOURCE_DATABASE"),
+    "schema": os.getenv("SOURCE_SCHEMA"),
+    "role": os.getenv("SOURCE_ROLE"),
+    "owner_role": os.getenv("SOURCE_OWNER_ROLE") 
 }
 
 # ==========================================
